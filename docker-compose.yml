@@ -1,0 +1,30 @@
+services:
+  imadex:
+    build: .
+    image: imadex:local
+    restart: unless-stopped
+    # The container binds 0.0.0.0; the host binding below keeps it loopback-only.
+    command: ["--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - ./data:/app/data
+    environment:
+      # Set both in a .env file (see .env.example) to enable authenticated tunnel mode.
+      FRAME_PUBLIC_ORIGIN: "${FRAME_PUBLIC_ORIGIN:-}"
+      FRAME_PASSWORD: "${FRAME_PASSWORD:-}"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import urllib.error, urllib.request
+          try:
+              urllib.request.urlopen("http://127.0.0.1:8765/api/status", timeout=5)
+          except urllib.error.HTTPError:
+              pass
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

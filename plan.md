@@ -157,3 +157,16 @@ Definition of done: manual People albums are persistent, correctable, searchable
 - 20 automated tests pass, including all 13 pre-existing tests. Real YuNet checks passed on portrait, two-face, and no-face fixtures.
 - Browser checks at 390px passed for batch assignment, album count, rename, cover selection, and label removal; no horizontal overflow in the management dialog.
 - Remaining validation: complete phone detection review, 320px/keyboard checks, regression smoke checks, documentation review, and main-server restart. Live Drive/tunnel verification remains dependent on user setup.
+
+## Docker packaging — 2026-09-23
+
+Status: files added, not yet built or verified locally (Docker is not installed on this machine).
+
+- Added `Dockerfile` (python:3.12-slim, `libgomp1` + `libglib2.0-0` for ONNX Runtime/OpenCV, installs pinned `requirements.txt`).
+- Added `docker-compose.yml`: single `imadex` service, `./data:/app/data` volume, host publish `127.0.0.1:8765` (loopback-only), tunnel-mode env passthrough, and an HTTP healthcheck that tolerates Basic-auth 401.
+- Added `.dockerignore` (excludes `data/`, secrets, caches, logs, VCS, assistant docs) and `.env.example` for tunnel mode.
+- Added `--host` / `IMAGE_INDEX_HOST` to `app.py` (default unchanged: `127.0.0.1`); the container passes `--host 0.0.0.0`. Host/Origin allowlisting still restricts requests to loopback or the configured public origin, so the security posture is unchanged.
+- Updated README with a "Run with Docker" section, dependency table, project layout, config reference, and tech stack.
+
+Remaining: user to run `docker compose up --build` and confirm build, first-run model download into the volume, local dashboard access, tests-in-container, and tunnel mode if desired.
+

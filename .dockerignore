@@ -1,0 +1,42 @@
+# Runtime state is mounted, never baked into the image.
+data/
+.venv/
+venv/
+env/
+
+# Version control and Docker metadata.
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Python caches and build artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Logs.
+*.log
+
+# Editors and OS files.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets and local environment.
+.env
+.env.*
+
+# Project documentation and assistant instructions (not needed at runtime).
+plan.md
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+OPENCODE.md

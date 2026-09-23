@@ -433,11 +433,12 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--host', default=os.environ.get('IMAGE_INDEX_HOST', '127.0.0.1'), help='Bind address. Defaults to loopback; use 0.0.0.0 only inside a container.')
     parser.add_argument('--port', type=int, default=8765)
     parser.add_argument('--public-origin', default=os.environ.get('FRAME_PUBLIC_ORIGIN'), help='Exact HTTPS tunnel origin. Requires FRAME_PASSWORD.')
     args = parser.parse_args()
     initialize()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         configure_access(server, args.public_origin, os.environ.get('FRAME_PASSWORD'))
     except ValueError as error:

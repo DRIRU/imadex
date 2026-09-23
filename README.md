@@ -21,6 +21,7 @@ Drive access needs the network.
 - [Features](#features)
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+- [Run with Docker](#run-with-docker)
 - [Project layout](#project-layout)
 - [How the embedding pipeline works](#how-the-embedding-pipeline-works)
 - [Connect Google Drive](#connect-google-drive)
@@ -64,11 +65,12 @@ Drive access needs the network.
 
 Python dependencies ([`requirements.txt`](requirements.txt)):
 
-| Package         | Version  | Purpose                                    |
-| --------------- | -------- | ------------------------------------------ |
-| `Pillow`        | 12.2.0   | Decoding, EXIF orientation, thumbnails     |
-| `fastembed`     | 0.8.1    | ONNX CPU inference for CLIP image/text     |
-| `qdrant-client` | 1.19.1   | Embedded vector store (local mode)         |
+| Package                  | Version   | Purpose                                     |
+| ------------------------ | --------- | ------------------------------------------- |
+| `Pillow`                  | 12.2.0      | Decoding, EXIF orientation, thumbnails            |
+| `fastembed`               | 0.8.1       | ONNX CPU inference for CLIP image/text            |
+| `qdrant-client`           | 1.19.1      | Embedded vector store (local mode)                |
+| `opencv-python-headless`  | 4.11.0.86   | Optional local YuNet face-region detection        |
 
 ---
 
@@ -91,6 +93,48 @@ virtual environment on first launch and then starts the server.
 
 ---
 
+## Run with Docker
+
+A [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml) are
+included for a containerized deployment. Docker is optional; the venv workflow
+above is the primary path.
+
+```sh
+docker compose up --build
+```
+
+Open <http://127.0.0.1:8765>. The compose file publishes the port as
+`127.0.0.1:8765` so the service stays loopback-only on the host, matching the
+app's local-only design. The container itself binds `0.0.0.0` (via
+`--host 0.0.0.0`); the app still rejects any `Host`/`Origin` that is not loopback
+or your configured public origin.
+
+- **State is persisted** through the `./data:/app/data` volume, so the SQLite
+  catalog, Qdrant vectors, thumbnails, CLIP weights, and OAuth files survive
+  rebuilds. Put `data/google-client.json` on the host before connecting Drive.
+- **First run downloads ~600 MB** of CLIP weights (and a ~233 KB YuNet model on
+  first face detection) into `./data/models/`. The healthcheck reports healthy
+  once the HTTP server is answering, which can happen before weights finish.
+- **Stop** with `Ctrl+C` or `docker compose down`; **rebuild** after code
+  changes with `docker compose up --build`. Run a single service against a given
+  `data/` directory.
+- **Tunnel mode:** copy [`.env.example`](.env.example) to `.env`, set
+  `FRAME_PUBLIC_ORIGIN` and `FRAME_PASSWORD`, then restart. Point your
+  Cloudflare Tunnel at `http://127.0.0.1:8765` on the host; see
+  [Phone access through Cloudflare Tunnel](#phone-access-through-cloudflare-tunnel).
+- **Google Drive sign-in** must be completed on the PC at
+  `http://127.0.0.1:8765`, exactly as in the native workflow.
+- Files not needed at runtime (`data/`, `.git/`, caches, logs, secrets) are kept
+  out of the image by [`.dockerignore`](.dockerignore).
+
+To run the test suite inside the image:
+
+```sh
+docker compose run --rm --entrypoint python imadex -m unittest discover -s tests -v
+```
+
+---
+
 ## Project layout
 
 ```
@@ -98,32 +142,45 @@ imadex/
 ├─ app.py                  HTTP server, SQLite catalog, scanning, REST + static serving
 ├─ drive.py                Read-only Google Drive client (OAuth 2.0 with PKCE)
 ├─ semantic.py             CLIP image/text embeddings + Qdrant vector search
+├─ people.py               Manual People albums: labels, covers, merge/delete
+├─ detection.py            Optional local YuNet face-region detection
+├─ backup_catalog.py       Consistent SQLite-only catalog backup
 ├─ verify_embeddings.py    Real-model smoke test (CLIP + Qdrant, temp catalog)
+├─ verify_detection.py     Real YuNet face-detection smoke test
 ├─ requirements.txt        Pinned Python dependencies
+├─ Dockerfile              Container image (python:3.12-slim)
+├─ docker-compose.yml      Single-service compose definition
+├─ .dockerignore           Keeps state, secrets, and caches out of the image
+├─ .env.example            Template for tunnel-mode environment variables
 ├─ start.ps1               Create venv (first run), install deps, run the server
 ├─ start-tunnel-access.ps1 Start in authenticated tunnel mode with a password
 ├─ server.log              Server output (gitignored)
+├─ licenses/               Third-party license texts (e.g. YuNet)
 ├─ web/                    Static front end (no build step)
 │  ├─ index.html           Dashboard shell
 │  ├─ app.js               Client logic, polling, viewer, search
+│  ├─ people.js            People albums and detection review UI
 │  ├─ style.css            Desktop styling
 │  ├─ mobile.css           Responsive / phone layout
 │  ├─ semantic.css         Visual-search panel styling
+│  ├─ people.css           People and detection styling
 │  └─ favicon.svg
 ├─ tests/
 │  ├─ test_catalog.py      Catalog, scanning, API, duplicates, security
-│  └─ test_semantic.py     Embedding lifecycle with deterministic model stubs
+│  ├─ test_semantic.py     Embedding lifecycle with deterministic model stubs
+│  └─ test_people.py       People labels, filters, and detection state
 └─ data/                   Runtime state — created on first launch (gitignored)
    ├─ catalog.sqlite3      Metadata source of truth (WAL)
    ├─ vectors/             Qdrant local collection
-   ├─ models/              Cached CLIP ONNX weights
+   ├─ models/              Cached CLIP and YuNet ONNX weights
    ├─ thumbnails/          Cached JPEG thumbnails for local sources
    ├─ google-client.json   Your Desktop OAuth client (you provide)
    └─ google-token.json    OAuth tokens (written after sign-in)
 ```
 
-The web server binds **only to `127.0.0.1`**. `data/` and the OAuth files are
-never served by the web server.
+The web server binds **only to `127.0.0.1`** by default (`--host 0.0.0.0` is used
+only inside the container). `data/` and the OAuth files are never served by the
+web server.
 
 ---
 
@@ -278,9 +335,11 @@ credentials never leave the PC.
 
 | Setting | Default | Purpose |
 | ------- | ------- | ------- |
-| `--port` | `8765` | HTTP listen port (loopback only). |
+| `--host` | `127.0.0.1` | Bind address. Set `0.0.0.0` only inside a container. |
+| `--port` | `8765` | HTTP listen port. |
 | `--public-origin` | – | Exact HTTPS origin allowed for tunnel mode. |
 | `IMAGE_INDEX_DATA` | `./data` | Override the runtime data directory. |
+| `IMAGE_INDEX_HOST` | `127.0.0.1` | Env equivalent of `--host`. |
 | `FRAME_PUBLIC_ORIGIN` | – | Env equivalent of `--public-origin`. |
 | `FRAME_PASSWORD` | – | Tunnel-mode password (≥16 chars). Required with a public origin. |
 
@@ -385,8 +444,9 @@ credentials and sign-in.
 
 Python 3.12 · [Pillow](https://python-pillow.org/) ·
 [FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime, CLIP ViT-B/32) ·
-[Qdrant](https://qdrant.tech/) local mode · SQLite · vanilla HTML/CSS/JS front
-end · Google Drive API (OAuth 2.0 + PKCE) · Cloudflare Tunnel for remote access.
+[Qdrant](https://qdrant.tech/) local mode · SQLite · OpenCV (YuNet face
+detection) · vanilla HTML/CSS/JS front end · Google Drive API (OAuth 2.0 + PKCE) ·
+Cloudflare Tunnel for remote access · Docker / Docker Compose (optional).
 
 
 ## People albums and optional face detection
