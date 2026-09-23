@@ -199,7 +199,7 @@ async function recognitionStatus() {
   const s=await api('/api/recognition');
   $('enableRecognition').checked=s.enabled;
   $('autoThreshold').value=s.auto_threshold;$('reviewThreshold').value=s.review_threshold;
-  $('recognitionStatus').textContent=s.available?(s.enabled?`${s.faces} faces recognized · ${s.pending} pending · ${s.failed} failed${s.running?' · working…':''}`:'Disabled. Enable to group matching faces into albums.'):'Model not installed. Run download_arcface.py, then restart.';
+  $('recognitionStatus').textContent=s.available?(s.enabled?`${s.faces} faces recognized · ${s.pending} pending · ${s.failed} failed · ${s.provider.includes('CUDA')?'GPU':'CPU'}${s.running?' · working…':''}`:'Disabled. Enable to group matching faces into albums.'):'Model not installed. Run download_arcface.py, then restart.';
   $('queueRecognition').disabled=!s.enabled;
   await loadRecognitionSuggestions();
 }

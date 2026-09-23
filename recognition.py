@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+import accel
 from detection import detect_faces, load_model
 from people import image_revision
 
@@ -113,7 +114,7 @@ class Recognizer:
                 raise ModelUnavailable('ArcFace model missing. Run "python download_arcface.py" or place '
                     + MODEL_FILE + ' in data/models/. Its pretrained weights are for non-commercial research use only.')
             import onnxruntime
-            self.session = onnxruntime.InferenceSession(str(self.model_path), providers=['CPUExecutionProvider'])
+            self.session = onnxruntime.InferenceSession(str(self.model_path), providers=accel.providers())
         return self.session
 
     def embed(self, frame, faces):
@@ -152,7 +153,7 @@ class Recognizer:
                 WHERE f.status='suggested' AND i.missing=0 AND f.revision=content_revision(i.digest,i.drive_id,i.size,i.mtime) AND f.model=?""", (MODEL,)).fetchone()[0]
             result = {**settings, 'enabled': bool(settings['enabled']), 'available': self.model_path.exists(),
                 'running': self.running, **counts, 'faces': faces, 'suggestions': suggestions,
-                'model': MODEL, 'dimensions': DIMENSIONS}
+                'model': MODEL, 'dimensions': DIMENSIONS, 'provider': accel.label()}
             if image_id is not None:
                 row = c.execute('SELECT * FROM images WHERE id=? AND missing=0', (int(image_id),)).fetchone()
                 if row is None:

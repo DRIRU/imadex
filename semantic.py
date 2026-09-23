@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageOps
 from qdrant_client import QdrantClient, models
 
+import accel
 import drive
 
 VISION_MODEL = 'Qdrant/clip-ViT-B-32-vision'
@@ -72,7 +73,7 @@ class SemanticIndex:
     def ensure_models(self, vision=True, text=True):
         from fastembed import ImageEmbedding, TextEmbedding
         with self.model_lock:
-            options = {'cache_dir': str(self.model_cache), 'threads': min(4, os.cpu_count() or 1), 'providers': ['CPUExecutionProvider']}
+            options = {'cache_dir': str(self.model_cache), 'threads': min(4, os.cpu_count() or 1), 'providers': accel.providers()}
             try:
                 if vision and self.image_model is None:
                     self.update(message='Loading image model (first use downloads model weights)…')
@@ -154,7 +155,8 @@ class SemanticIndex:
         with self.state_lock:
             progress = dict(self.progress)
         return {**progress, 'total': len(rows), 'ready': ready, 'pending': len(rows) - ready - failed,
-                'failed': failed, 'errors': errors[-20:], 'model': MODEL_VERSION, 'dimensions': DIMENSIONS, 'database': 'Qdrant local'}
+                'failed': failed, 'errors': errors[-20:], 'model': MODEL_VERSION, 'dimensions': DIMENSIONS,
+                'database': 'Qdrant local', 'provider': accel.label()}
 
     def queue(self, retry_failed=False):
         if retry_failed:

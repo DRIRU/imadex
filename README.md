@@ -70,7 +70,7 @@ Python dependencies ([`requirements.txt`](requirements.txt)):
 | `fastembed`               | 0.8.1       | ONNX CPU inference for CLIP image/text            |
 | `qdrant-client`           | 1.19.1      | Embedded vector store (local mode)                |
 | `opencv-python-headless`  | 4.11.0.86   | YuNet face detection + face alignment             |
-| `onnxruntime`             | 1.30.0      | Runs the CLIP and ArcFace models                  |
+| `onnxruntime`             | 1.30.0      | Runs CLIP and ArcFace (CPU; swap for `onnxruntime-gpu` for CUDA) |
 
 ---
 
@@ -229,6 +229,24 @@ survive restarts.
 Model weights download on first use into `data/models/`. Subsequent inference is
 fully offline except for Google Drive access.
 
+### GPU acceleration (optional)
+
+By default inference runs on the CPU via ONNX Runtime using up to four threads.
+You can optionally use an NVIDIA GPU for the CLIP and ArcFace models:
+
+1. Uninstall the CPU package and install the GPU build (they conflict):
+   `pip uninstall onnxruntime` then `pip install onnxruntime-gpu`, plus a matching
+   CUDA/cuDNN runtime on Windows.
+2. Set `IMAGE_INDEX_PROVIDER` (see the [configuration reference](#configuration-reference)):
+   - `auto` (default) — use CUDA when the installed onnxruntime offers it, otherwise CPU;
+   - `cpu` — always CPU;
+   - `cuda` — require CUDA and fail clearly if the GPU build is missing.
+
+The current provider is shown in the **Visual search** and **People** panels and
+returned by `/api/embeddings` and `/api/recognition` (`provider`). Only inference
+is accelerated: Qdrant local mode and the pip OpenCV build stay CPU-only, and
+Drive download/decode can still dominate indexing time.
+
 ---
 
 ## Connect Google Drive
@@ -346,6 +364,7 @@ credentials never leave the PC.
 | `--public-origin` | – | Exact HTTPS origin allowed for tunnel mode. |
 | `IMAGE_INDEX_DATA` | `./data` | Override the runtime data directory. |
 | `IMAGE_INDEX_HOST` | `127.0.0.1` | Env equivalent of `--host`. |
+| `IMAGE_INDEX_PROVIDER` | `auto` | ONNX provider: `auto`, `cpu`, or `cuda`. |
 | `FRAME_PUBLIC_ORIGIN` | – | Env equivalent of `--public-origin`. |
 | `FRAME_PASSWORD` | – | Tunnel-mode password (≥16 chars). Required with a public origin. |
 

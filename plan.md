@@ -195,4 +195,18 @@ Remaining: confirm real grouping quality on the user's own photos, tune threshol
 - Full automated suite: 33 tests pass (23 prior + 10 recognition).
 - Download throughput from GitHub release CDN measured at ~0.5 MB/s from this location, so the initial 275 MB fetch takes ~9 minutes; the script now resumes and shows progress.
 
+## Optional GPU acceleration — 2026-09-23
+
+Status: implemented; CPU remains the default and no behavior changes unless a GPU build is installed.
+
+- Added `accel.py`: selects ONNX execution providers from `IMAGE_INDEX_PROVIDER` (`auto` default, `cpu`, `cuda`/`gpu`). `auto` uses CUDA when the installed onnxruntime offers it and falls back to CPU; an explicit `cuda` request with the CPU build raises a clear error.
+- `semantic.py` (CLIP) and `recognition.py` (ArcFace) now request `accel.providers()` instead of hard-coded CPU, and both status endpoints report the active `provider`.
+- UI shows GPU/CPU in the Visual search and People status lines.
+- This machine has an NVIDIA GTX 1650 (4 GB) but the installed onnxruntime is the CPU build (`get_available_providers()` = Azure + CPU), so indexing currently runs on CPU. Enabling the GPU requires installing `onnxruntime-gpu` (conflicts with `onnxruntime`) plus CUDA/cuDNN, then setting `IMAGE_INDEX_PROVIDER=cuda` (or leaving `auto`).
+- Qdrant local mode and the pip OpenCV build are not GPU-accelerated; only CLIP/ArcFace inference is.
+- Tests: `tests/test_accel.py` (4 tests) covers cpu/auto/explicit-cuda selection and fallback. Full suite: 37 tests.
+
+Remaining: on a GPU-enabled install, confirm `provider` reports CUDA, compare indexing speed, and document any CUDA/cuDNN version requirements.
+
+
 

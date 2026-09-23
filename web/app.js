@@ -40,7 +40,7 @@ async function poll(){
  $('scanStatus').textContent=status.message;$('rescan').disabled=status.running;
  $('scanErrors').hidden=!status.errors.length;$('scanErrors').textContent=status.errors.join('\n');
  state.embeddings=embedding;
- $('embeddingStatus').textContent=`${embedding.ready} / ${embedding.total} images ready${embedding.failed?' · '+embedding.failed+' failed':''}`;
+ $('embeddingStatus').textContent=`${embedding.ready} / ${embedding.total} images ready${embedding.failed?' · '+embedding.failed+' failed':''}${embedding.provider?' · '+((embedding.provider.includes('CUDA'))?'GPU':'CPU'):''}`;
  $('embeddingProgress').max=Math.max(1,embedding.total);$('embeddingProgress').value=embedding.ready;
  $('embeddingMessage').textContent=embedding.running?embedding.message:(embedding.error||'Describe a scene, object, or color. Embeddings stay on this PC.');
  $('indexEmbeddings').disabled=embedding.running;$('indexEmbeddings').textContent=embedding.running?'Indexing…':(embedding.failed||embedding.error?'Retry indexing':'Index images');
