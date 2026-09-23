@@ -247,6 +247,52 @@ returned by `/api/embeddings` and `/api/recognition` (`provider`). Only inferenc
 is accelerated: Qdrant local mode and the pip OpenCV build stay CPU-only, and
 Drive download/decode can still dominate indexing time.
 
+### External Qdrant server (optional)
+
+By default, vectors live in embedded Qdrant local mode under `data/vectors/`. For
+larger libraries, or to run the store separately, point the app at a Qdrant server:
+
+```powershell
+$env:QDRANT_URL = 'http://127.0.0.1:6333'
+# optional: $env:QDRANT_API_KEY = '...'
+.\.venv\Scripts\python.exe app.py
+```
+
+With Docker Compose, the repository includes optional server profiles:
+
+- CPU: `docker compose --profile qdrant up --build`, with `QDRANT_URL=http://qdrant:6333` in `.env`.
+- GPU: `docker compose --profile qdrant-gpu up --build`, with `QDRANT_URL=http://qdrant-gpu:6333` in `.env`.
+
+Notes:
+
+- `QDRANT_COLLECTION` overrides the collection name (default `images_clip_b32_v1`);
+  `QDRANT_TIMEOUT` sets the client timeout in seconds (default `60`).
+- Embedded and server modes use separate vector stores. After switching, run
+  **Index images** once to populate the new store. The SQLite catalog (source of
+  truth for metadata) is unaffected.
+- `/api/embeddings` reports the active backend in its `database` field.
+- Only one app process should write to a given store.
+
+#### Can Qdrant be GPU accelerated?
+
+Yes, but with important limits (Qdrant **v1.13+**):
+
+- GPU is used for **indexing only** (building the HNSW index), **not search**. It
+  is enabled with `QDRANT__GPU__INDEXING=1`; the `qdrant-gpu` compose service sets
+  this for you.
+- GPU support ships only as dedicated Docker images for **Linux x86_64**: NVIDIA
+  `qdrant/qdrant:gpu-nvidia-latest`, AMD `qdrant/qdrant:gpu-amd-latest`. **Windows,
+  macOS, and ARM are not supported**, and NVIDIA requires the
+  [`nvidia-container-toolkit`](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+- Each GPU processes up to **16 GB** of vector data per indexing iteration.
+- Qdrant's GPU path uses Vulkan. Qdrant local mode and the pip OpenCV build are
+  never GPU-accelerated.
+- At this project's personal-library scale, embedded or CPU-server Qdrant is
+  usually plenty; GPU mainly helps when building very large indexes.
+
+See Qdrant's [Running with GPU](https://qdrant.tech/documentation/ops-configuration/running-with-gpu/)
+and [Installation](https://qdrant.tech/documentation/installation/) docs.
+
 ---
 
 ## Connect Google Drive
@@ -365,6 +411,10 @@ credentials never leave the PC.
 | `IMAGE_INDEX_DATA` | `./data` | Override the runtime data directory. |
 | `IMAGE_INDEX_HOST` | `127.0.0.1` | Env equivalent of `--host`. |
 | `IMAGE_INDEX_PROVIDER` | `auto` | ONNX provider: `auto`, `cpu`, or `cuda`. |
+| `QDRANT_URL` | – | External Qdrant URL; empty uses embedded local mode. |
+| `QDRANT_API_KEY` | – | API key for the external Qdrant server, if any. |
+| `QDRANT_COLLECTION` | `images_clip_b32_v1` | Collection name. |
+| `QDRANT_TIMEOUT` | `60` | Qdrant client timeout in seconds (server mode). |
 | `FRAME_PUBLIC_ORIGIN` | – | Env equivalent of `--public-origin`. |
 | `FRAME_PASSWORD` | – | Tunnel-mode password (≥16 chars). Required with a public origin. |
 
@@ -471,7 +521,7 @@ own credentials and sign-in.
 
 Python 3.12 · [Pillow](https://python-pillow.org/) ·
 [FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime, CLIP ViT-B/32) ·
-[Qdrant](https://qdrant.tech/) local mode · SQLite · OpenCV (YuNet face
+[Qdrant](https://qdrant.tech/) (embedded local or external server) · SQLite · OpenCV (YuNet face
 detection and alignment) · [InsightFace](https://github.com/deepinsight/insightface)
 ArcFace (face recognition) · vanilla HTML/CSS/JS front end · Google Drive API
 (OAuth 2.0 + PKCE) · Cloudflare Tunnel for remote access · Docker / Docker

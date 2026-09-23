@@ -62,9 +62,17 @@ class SemanticIndex:
                 image_id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, model TEXT NOT NULL,
                 status TEXT NOT NULL, error TEXT, updated REAL NOT NULL)''')
             conn.execute('CREATE INDEX IF NOT EXISTS embeddings_fingerprint ON image_embeddings(fingerprint)')
-        self.client = QdrantClient(path=str(self.data / 'vectors'), force_disable_check_same_thread=True)
-        if not self.client.collection_exists(COLLECTION):
-            self.client.create_collection(COLLECTION, vectors_config=models.VectorParams(size=DIMENSIONS, distance=models.Distance.COSINE))
+        self.collection = os.environ.get('QDRANT_COLLECTION') or COLLECTION
+        self.database, self.client = self._connect()
+        if not self.client.collection_exists(self.collection):
+            self.client.create_collection(self.collection, vectors_config=models.VectorParams(size=DIMENSIONS, distance=models.Distance.COSINE))
+
+    def _connect(self):
+        url = os.environ.get('QDRANT_URL', '').strip()
+        if url:
+            return ('Qdrant server (' + url + ')', QdrantClient(url=url, api_key=os.environ.get('QDRANT_API_KEY') or None,
+                timeout=float(os.environ.get('QDRANT_TIMEOUT', 60))))
+        return ('Qdrant local', QdrantClient(path=str(self.data / 'vectors'), force_disable_check_same_thread=True))
 
     def update(self, **values):
         with self.state_lock:
@@ -156,7 +164,7 @@ class SemanticIndex:
             progress = dict(self.progress)
         return {**progress, 'total': len(rows), 'ready': ready, 'pending': len(rows) - ready - failed,
                 'failed': failed, 'errors': errors[-20:], 'model': MODEL_VERSION, 'dimensions': DIMENSIONS,
-                'database': 'Qdrant local', 'provider': accel.label()}
+                'database': self.database, 'provider': accel.label()}
 
     def queue(self, retry_failed=False):
         if retry_failed:
@@ -193,7 +201,7 @@ class SemanticIndex:
                     LEFT JOIN images i ON i.id=e.image_id WHERE i.id IS NULL OR i.missing=1''')]
             if gone:
                 with self.vector_lock:
-                    self.client.delete(COLLECTION, points_selector=models.PointIdsList(points=gone))
+                    self.client.delete(self.collection, points_selector=models.PointIdsList(points=gone))
                 with self.db() as conn:
                     conn.executemany('DELETE FROM image_embeddings WHERE image_id=?', ((item,) for item in gone))
             for row in self.rows():
@@ -203,7 +211,7 @@ class SemanticIndex:
                 if row['embedded_fingerprint'] == signature and row['embedding_status'] == 'failed':
                     continue
                 with self.vector_lock:
-                    points = self.client.retrieve(COLLECTION, [row['id']], with_payload=True)
+                    points = self.client.retrieve(self.collection, [row['id']], with_payload=True)
                 if points and points[0].payload.get('fingerprint') == signature:
                     if row['embedding_status'] != 'ready' or row['embedded_fingerprint'] != signature:
                         self.record(row['id'], signature, 'ready')
@@ -217,7 +225,7 @@ class SemanticIndex:
                     reused = []
                     if duplicate:
                         with self.vector_lock:
-                            reused = self.client.retrieve(COLLECTION, [duplicate[0]], with_vectors=True)
+                            reused = self.client.retrieve(self.collection, [duplicate[0]], with_vectors=True)
                     if reused and reused[0].payload.get('fingerprint') == signature:
                         vector = reused[0].vector
                     else:
@@ -229,7 +237,7 @@ class SemanticIndex:
                     if current is None or fingerprint(current) != signature:
                         continue
                     with self.vector_lock:
-                        self.client.upsert(COLLECTION, [models.PointStruct(id=row['id'], vector=vector,
+                        self.client.upsert(self.collection, [models.PointStruct(id=row['id'], vector=vector,
                             payload={'fingerprint': signature, 'model': MODEL_VERSION})], wait=True)
                     self.record(row['id'], signature, 'ready')
                 except ModelUnavailable:
@@ -254,7 +262,7 @@ class SemanticIndex:
             return {'items': [], 'total': 0, 'semantic': True, 'indexed': 0, 'unindexed': len(candidates)}
         vector = self.encode_text(query)
         with self.vector_lock:
-            hits = self.client.query_points(COLLECTION, query=vector,
+            hits = self.client.query_points(self.collection, query=vector,
                 query_filter=models.Filter(must=[models.HasIdCondition(has_id=list(allowed))]),
                 limit=limit, offset=offset, with_payload=True).points
         items = []

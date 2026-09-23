@@ -208,5 +208,18 @@ Status: implemented; CPU remains the default and no behavior changes unless a GP
 
 Remaining: on a GPU-enabled install, confirm `provider` reports CUDA, compare indexing speed, and document any CUDA/cuDNN version requirements.
 
+## External Qdrant server — 2026-09-23
+
+Status: implemented; not yet exercised against a live server.
+
+- `semantic.py` now selects the vector backend at startup: `QDRANT_URL` (with optional `QDRANT_API_KEY`, `QDRANT_COLLECTION`, `QDRANT_TIMEOUT`) connects to an external server; when unset it keeps embedded local mode in `data/vectors/`. The active backend is reported in `/api/embeddings` as `database`.
+- `docker-compose.yml` gains two optional profiles: `qdrant` (CPU, `qdrant/qdrant:latest`) and `qdrant-gpu` (`qdrant/qdrant:gpu-nvidia-latest` with `QDRANT__GPU__INDEXING=1` and an NVIDIA device reservation), both persisting to `data/qdrant`. `.env.example` documents `QDRANT_URL=http://qdrant:6333` for Compose.
+- Tests: `tests/test_qdrant_config.py` (3 tests) verifies server URL/API key selection, custom collection name, and local default. Full suite: 40 tests.
+
+Qdrant GPU facts confirmed from the official docs (v1.13+): GPU accelerates indexing only (not search); GPU builds are Linux x86_64 Docker images only (`gpu-nvidia`/`gpu-amd`) and require the NVIDIA container toolkit; each GPU handles up to 16 GB of vectors per indexing iteration; Qdrant's GPU path uses Vulkan, so neither embedded local mode nor the pip OpenCV build is GPU-accelerated.
+
+Remaining: verify against a running Qdrant server (CPU and, on a Linux host, GPU), confirm index/query correctness with a real library, and note any migration steps when switching stores.
+
+
 
 
