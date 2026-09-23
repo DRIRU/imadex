@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import drive
 import people
+import recognition
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -28,6 +29,7 @@ status_lock = threading.Lock()
 scan_status = {'running': False, 'processed': 0, 'errors': [], 'message': 'Ready to index'}
 semantic_index = None
 face_detector = None
+recognizer = None
 
 
 def configure_access(server, public_origin=None, password=None):
@@ -78,6 +80,7 @@ def initialize():
         people.migrate(conn)
         from detection import migrate as migrate_detection
         migrate_detection(conn)
+        recognition.migrate(conn)
 
 
 def scan_drive(folder_id, root_id):
@@ -178,6 +181,8 @@ def scan(folder_id):
         scan_lock.release()
         if semantic_index is not None:
             semantic_index.queue()
+        if recognizer is not None:
+            recognizer.schedule()
 
 
 def start_scan(folder_id):
@@ -270,6 +275,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(people.People(db).image(int(url.path.split('/')[3])))
             if url.path == '/api/detection':
                 return self.respond(face_detector.status(params.get('image_id')) if face_detector else {'enabled': False, 'available': False})
+            if url.path == '/api/recognition':
+                return self.respond(recognizer.status(params.get('image_id')) if recognizer else {'enabled': False, 'available': False})
+            if url.path == '/api/recognition/faces':
+                if recognizer is None:
+                    return self.respond({'error': 'Face recognition is not started.'}, 503)
+                return self.respond(recognizer.image_faces(int(params['image_id'])))
+            if url.path == '/api/recognition/suggestions':
+                if recognizer is None:
+                    return self.respond({'error': 'Face recognition is not started.'}, 503)
+                return self.respond(recognizer.suggestions(params.get('offset', 0)))
             if url.path == '/api/embeddings':
                 if semantic_index is None:
                     return self.respond({'error': 'Embedding service is not started. Run the app using start.ps1.'}, 503)
@@ -373,6 +388,10 @@ class Handler(BaseHTTPRequestHandler):
                 if face_detector is None:
                     raise ValueError('Detection service unavailable')
                 return self.respond(face_detector.action(payload))
+            if self.path == '/api/recognition':
+                if recognizer is None:
+                    raise ValueError('Recognition service unavailable')
+                return self.respond(recognizer.action(payload))
             if self.path == '/api/embeddings':
                 if semantic_index is None:
                     raise ValueError('Embedding service is not started. Run the app using start.ps1.')
@@ -450,6 +469,8 @@ if __name__ == '__main__':
     from detection import Detector
     face_detector = Detector(DATA, db, semantic_index.load_image)
     face_detector.start()
+    recognizer = recognition.Recognizer(DATA, db, semantic_index.load_image)
+    recognizer.start()
     print(f'Image library: http://127.0.0.1:{args.port}', flush=True)
     try:
         server.serve_forever()
@@ -457,4 +478,5 @@ if __name__ == '__main__':
         server.server_close()
     finally:
         face_detector.close()
+        recognizer.close()
         semantic_index.close()

@@ -19,6 +19,11 @@
 .detectionSettings button{margin:6px 4px 6px 0}
 #facePreview{position:relative;line-height:0;margin:12px 0}#facePreviewImage{width:100%;display:block;height:auto}
 #faceBoxes{position:absolute;inset:0;pointer-events:none}#faceBoxes span{position:absolute;border:2px solid #b4f0c8;background:#b4f0c820;box-sizing:border-box}
+.thresholds{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:8px 0}
+.thresholds label{display:flex;gap:6px;align-items:center}.thresholds input{width:84px;min-height:44px;padding:8px;box-sizing:border-box}
+.recognitionSuggestion{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0;border-bottom:1px solid var(--line);padding-bottom:10px}
+.recognitionSuggestion img{width:48px;height:48px;object-fit:cover;border-radius:8px}
+.recognitionSuggestion span{flex:1;min-width:120px;overflow-wrap:anywhere}
 #personPicker,#personManager,#peopleConfirm{width:480px;max-width:calc(100vw - 24px)}
 #personManager button,#peopleConfirm button,#pickerCreate{margin:8px 0}#personManager select{width:100%;max-width:100%}
 #confirmDescription,#managerSummary{overflow-wrap:anywhere;line-height:1.6}

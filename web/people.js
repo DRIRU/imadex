@@ -15,7 +15,7 @@ function setPeopleLayout() {
   for (const el of document.querySelectorAll('.toolbar,.semanticpanel,#embeddingErrors,.resultsline,#gallery,#empty,#more,#peopleTools')) el.hidden = people;
   $('managePerson').hidden = !state.person;
   $('clearPerson').hidden = !state.person;
-  if (people) { $('headingCount').textContent=''; safely(detectionStatus)(); }
+  if (people) { $('headingCount').textContent=''; safely(detectionStatus)(); safely(recognitionStatus)(); }
   updateSelection();
 }
 function updateSelection() {
@@ -148,6 +148,7 @@ $('mergePerson').onclick=()=>{
 async function loadPhotoPeople(item) {
   currentPhoto=item;const request=++photoRequest;clearTimeout(detectionTimer);
   $('photoPeople').textContent='Loading labels…';$('labelPhoto').disabled=true;$('detectPhoto').disabled=true;$('photoDetectionStatus').textContent='';$('facePreview').hidden=true;$('ignoreDetection').hidden=true;
+  $('photoFaces').replaceChildren();$('photoRecognitionStatus').textContent='';
   $('setPersonCover').hidden=true;
   try {
     const result=await api(`/api/images/${item.id}/people`);if(request!==photoRequest)return;
@@ -166,6 +167,7 @@ async function loadPhotoPeople(item) {
     $('setPersonCover').hidden=!person;
     $('setPersonCover').onclick=safely(async()=>{await api('/api/people',{action:'cover',person_id:person.id,version:person.version,image_id:item.id});toast('Album cover saved.');await loadPhotoPeople(item)});
     await photoDetection(item,request);
+    await photoRecognition(item,request);
   }catch(error){if(request===photoRequest)$('photoPeople').textContent=error.message;throw error}
 }
 async function detectionStatus() {
@@ -191,5 +193,49 @@ async function photoDetection(item,request) {
   if(s.enabled&&d.status==='pending')detectionTimer=setTimeout(safely(()=>photoDetection(item,request)),1500);
 }
 $('viewer').addEventListener('close',()=>{++photoRequest;clearTimeout(detectionTimer)});
-setInterval(()=>{if(!document.hidden&&state.view==='people')safely(detectionStatus)()},5000);
+setInterval(()=>{if(!document.hidden&&state.view==='people'){safely(detectionStatus)();safely(recognitionStatus)()}},5000);
+
+async function recognitionStatus() {
+  const s=await api('/api/recognition');
+  $('enableRecognition').checked=s.enabled;
+  $('autoThreshold').value=s.auto_threshold;$('reviewThreshold').value=s.review_threshold;
+  $('recognitionStatus').textContent=s.available?(s.enabled?`${s.faces} faces recognized · ${s.pending} pending · ${s.failed} failed${s.running?' · working…':''}`:'Disabled. Enable to group matching faces into albums.'):'Model not installed. Run download_arcface.py, then restart.';
+  $('queueRecognition').disabled=!s.enabled;
+  await loadRecognitionSuggestions();
+}
+async function loadRecognitionSuggestions() {
+  const box=$('recognitionSuggestions');box.replaceChildren();
+  const result=await api('/api/recognition/suggestions?offset=0');
+  if(!result.total)return;
+  const heading=document.createElement('p');heading.textContent=`${result.total} face match${result.total===1?'':'es'} to review:`;
+  box.append(heading);
+  for(const item of result.items){
+    const row=document.createElement('div');row.className='recognitionSuggestion';
+    const img=document.createElement('img');img.src='/thumb/'+item.image_id;img.alt='';img.loading='lazy';img.onerror=()=>img.remove();
+    const text=document.createElement('span');text.textContent=`${item.person_name} · ${Math.round(item.match_score*100)}%`;
+    row.append(img,text,
+      button('Confirm',async()=>{await api('/api/recognition',{action:'confirm',face_id:item.id});await recognitionStatus();toast('Added to '+item.person_name+'.')}),
+      button('Not them',async()=>{await api('/api/recognition',{action:'reject',face_id:item.id});await recognitionStatus()}));
+    box.append(row);
+  }
+}
+$('enableRecognition').onchange=safely(async()=>{await api('/api/recognition',{action:'enable',enabled:$('enableRecognition').checked});await recognitionStatus()});
+$('saveThresholds').onclick=safely(async()=>{await api('/api/recognition',{action:'settings',auto_threshold:$('autoThreshold').value,review_threshold:$('reviewThreshold').value});await recognitionStatus();toast('Thresholds saved.')});
+$('queueRecognition').onclick=safely(async()=>{await api('/api/recognition',{action:'queue'});await recognitionStatus();toast('Recognition queued. You can keep browsing.')});
+$('clearRecognition').onclick=()=>confirmChange('Clear all recognized faces and pending recognition jobs? Your people labels and albums remain.',async()=>{await api('/api/recognition',{action:'clear'});await recognitionStatus()});
+async function photoRecognition(item,request) {
+  const box=$('photoFaces');box.replaceChildren();$('photoRecognitionStatus').textContent='';
+  try {
+    const result=await api('/api/recognition/faces?image_id='+item.id);if(request!==photoRequest||!$('viewer').open)return;
+    if(!result.items.length){$('photoRecognitionStatus').textContent='No recognized faces.';return}
+    for(const f of result.items){
+      const row=document.createElement('div');row.className='personChip';
+      const label=document.createElement('span');
+      label.textContent=(f.person_name||'Unmatched')+(f.status==='suggested'?' · review':(f.status==='rejected'?' · dismissed':(f.current?'':' · photo changed')));
+      row.append(label);
+      if(f.status==='suggested'){row.append(button('Confirm '+f.person_name,async()=>{await api('/api/recognition',{action:'confirm',face_id:f.id});await photoRecognition(item,request)}));row.append(button('Not them',async()=>{await api('/api/recognition',{action:'reject',face_id:f.id});await photoRecognition(item,request)}))}
+      box.append(row);
+    }
+  } catch(error){if(request===photoRequest)$('photoRecognitionStatus').textContent=error.message}
+}
 document.querySelectorAll('#personPicker [data-close],#personManager [data-close],#peopleConfirm [data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());

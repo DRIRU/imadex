@@ -24,6 +24,39 @@ def migrate(c):
     ''')
 
 
+def load_model(data):
+    import cv2
+    path = data / 'models' / 'face_detection_yunet_2023mar.onnx'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != SHA256:
+        with urlopen(MODEL_URL, timeout=30) as response:
+            raw = response.read(1024 * 1024)
+        if hashlib.sha256(raw).hexdigest() != SHA256:
+            raise ValueError('Detector download checksum mismatch. Retry later.')
+        pending = path.with_suffix('.part')
+        pending.write_bytes(raw)
+        pending.replace(path)
+    cv2.setNumThreads(2)
+    return cv2.FaceDetectorYN.create(str(path), '', (320, 320), 0.85, 0.3, 5000)
+
+
+def detect_faces(model, picture, limit=1280):
+    import cv2
+    picture = picture.copy()
+    picture.thumbnail((limit, limit))
+    frame = cv2.cvtColor(np.asarray(picture), cv2.COLOR_RGB2BGR)
+    height, width = frame.shape[:2]
+    model.setInputSize((width, height))
+    _, faces = model.detect(frame)
+    items = []
+    for face in ([] if faces is None else faces):
+        if not np.isfinite(face).all():
+            continue
+        items.append({'x': float(face[0]), 'y': float(face[1]), 'width': float(face[2]), 'height': float(face[3]),
+            'landmarks': [[float(face[4 + 2*i]), float(face[5 + 2*i])] for i in range(5)], 'confidence': float(face[-1])})
+    return frame, items
+
+
 class Detector:
     def __init__(self, data, db, load_image):
         self.data, self.db, self.load_image = Path(data), db, load_image
@@ -89,30 +122,15 @@ class Detector:
         import cv2
         cv2.setNumThreads(2)
         if self.model is None:
-            path = self.data / 'models' / 'face_detection_yunet_2023mar.onnx'
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != SHA256:
-                with urlopen(MODEL_URL, timeout=30) as response:
-                    raw = response.read(1024 * 1024)
-                if hashlib.sha256(raw).hexdigest() != SHA256:
-                    raise ValueError('Detector download checksum mismatch. Retry later.')
-                pending = path.with_suffix('.part')
-                pending.write_bytes(raw)
-                pending.replace(path)
-            self.model = cv2.FaceDetectorYN.create(str(path), '', (320, 320), 0.85, 0.3, 5000)
-        picture = picture.copy()
-        picture.thumbnail((1280, 1280))
-        pixels = cv2.cvtColor(np.asarray(picture), cv2.COLOR_RGB2BGR)
-        height, width = pixels.shape[:2]
-        self.model.setInputSize((width, height))
-        _, faces = self.model.detect(pixels)
+            self.model = load_model(self.data)
+        frame, faces = detect_faces(self.model, picture)
+        height, width = frame.shape[:2]
         regions = []
-        for face in ([] if faces is None else faces):
-            x, y, w, h = (float(v) for v in face[:4])
-            x1, y1 = max(0, min(1, x / width)), max(0, min(1, y / height))
-            x2, y2 = max(0, min(1, (x+w) / width)), max(0, min(1, (y+h) / height))
-            if x2 > x1 and y2 > y1 and np.isfinite(face).all():
-                regions.append({'x': x1, 'y': y1, 'width': x2-x1, 'height': y2-y1, 'confidence': float(face[-1])})
+        for face in faces:
+            x1, y1 = max(0, min(1, face['x'] / width)), max(0, min(1, face['y'] / height))
+            x2, y2 = max(0, min(1, (face['x']+face['width']) / width)), max(0, min(1, (face['y']+face['height']) / height))
+            if x2 > x1 and y2 > y1:
+                regions.append({'x': x1, 'y': y1, 'width': x2-x1, 'height': y2-y1, 'confidence': face['confidence']})
         return regions
 
     def process_one(self):

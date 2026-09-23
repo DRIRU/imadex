@@ -70,7 +70,8 @@ Python dependencies ([`requirements.txt`](requirements.txt)):
 | `Pillow`                  | 12.2.0      | Decoding, EXIF orientation, thumbnails            |
 | `fastembed`               | 0.8.1       | ONNX CPU inference for CLIP image/text            |
 | `qdrant-client`           | 1.19.1      | Embedded vector store (local mode)                |
-| `opencv-python-headless`  | 4.11.0.86   | Optional local YuNet face-region detection        |
+| `opencv-python-headless`  | 4.11.0.86   | YuNet face detection + face alignment             |
+| `onnxruntime`             | 1.30.0      | Runs the CLIP and ArcFace models                  |
 
 ---
 
@@ -84,7 +85,9 @@ python -m venv .venv
 ```
 
 Open <http://127.0.0.1:8765>. Alternatively run `start.ps1`, which creates the
-virtual environment on first launch and then starts the server.
+virtual environment on first launch, installs dependencies, offers to download the
+ArcFace model when it is missing, and then starts the server. Extra arguments are
+forwarded to `app.py`, for example `.\start.ps1 --port 8766`.
 
 - Stop with `Ctrl+C` in the terminal.
 - Use a different port with `.\.venv\Scripts\python.exe app.py --port 8766`.
@@ -144,9 +147,12 @@ imadex/
 ├─ semantic.py             CLIP image/text embeddings + Qdrant vector search
 ├─ people.py               Manual People albums: labels, covers, merge/delete
 ├─ detection.py            Optional local YuNet face-region detection
+├─ recognition.py          Optional ArcFace face recognition and auto-grouping
+├─ download_arcface.py     Fetch the ArcFace model (accepts its license)
 ├─ backup_catalog.py       Consistent SQLite-only catalog backup
 ├─ verify_embeddings.py    Real-model smoke test (CLIP + Qdrant, temp catalog)
 ├─ verify_detection.py     Real YuNet face-detection smoke test
+├─ verify_recognition.py   Real ArcFace face-embedding smoke test
 ├─ requirements.txt        Pinned Python dependencies
 ├─ Dockerfile              Container image (python:3.12-slim)
 ├─ docker-compose.yml      Single-service compose definition
@@ -168,7 +174,8 @@ imadex/
 ├─ tests/
 │  ├─ test_catalog.py      Catalog, scanning, API, duplicates, security
 │  ├─ test_semantic.py     Embedding lifecycle with deterministic model stubs
-│  └─ test_people.py       People labels, filters, and detection state
+│  ├─ test_people.py       People labels, filters, and detection state
+│  └─ test_recognition.py  ArcFace grouping, suggestions, and API auth
 └─ data/                   Runtime state — created on first launch (gitignored)
    ├─ catalog.sqlite3      Metadata source of truth (WAL)
    ├─ vectors/             Qdrant local collection
@@ -410,15 +417,17 @@ the app in your Google account's third-party connections if desired.
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 .\.venv\Scripts\python.exe verify_embeddings.py
+.\.venv\Scripts\python.exe verify_recognition.py   # requires the ArcFace model
 ```
 
 Unit/integration tests use temporary images, a real local Qdrant store, and
 deterministic model substitutes for lifecycle tests. `verify_embeddings.py`
 separately runs **actual** CLIP image and text inference, verifies
 color-description ranking, and checks incremental resume against a temporary
-catalog and the shared model cache. Drive downloads are simulated in tests;
-live Google OAuth, folder access, and private image streaming require your own
-credentials and sign-in.
+catalog and the shared model cache. `verify_recognition.py` runs real YuNet +
+ArcFace inference on a downloaded fixture. Drive downloads are simulated in
+tests; live Google OAuth, folder access, and private image streaming require your
+own credentials and sign-in.
 
 ---
 
@@ -445,8 +454,10 @@ credentials and sign-in.
 Python 3.12 · [Pillow](https://python-pillow.org/) ·
 [FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime, CLIP ViT-B/32) ·
 [Qdrant](https://qdrant.tech/) local mode · SQLite · OpenCV (YuNet face
-detection) · vanilla HTML/CSS/JS front end · Google Drive API (OAuth 2.0 + PKCE) ·
-Cloudflare Tunnel for remote access · Docker / Docker Compose (optional).
+detection and alignment) · [InsightFace](https://github.com/deepinsight/insightface)
+ArcFace (face recognition) · vanilla HTML/CSS/JS front end · Google Drive API
+(OAuth 2.0 + PKCE) · Cloudflare Tunnel for remote access · Docker / Docker
+Compose (optional).
 
 
 ## People albums and optional face detection
@@ -539,3 +550,48 @@ Additional real-model verification:
 This downloads a public-domain NASA fixture in memory and checks single/multiple
 face regions, EXIF rotation, bounds, and a blank image. It never adds test photos
 to your catalog. Live Drive and Cloudflare verification still requires your setup.
+
+### Face recognition (ArcFace)
+
+Optional face **recognition** groups matching faces into People albums.
+
+- **Model.** InsightFace ArcFace `w600k_r50`, run locally with ONNX Runtime. Run
+  `python download_arcface.py` to fetch it (resumable, with progress; `start.ps1`
+  also offers this on first launch); it extracts
+  `w600k_r50.onnx` into `data/models/` and checks the SHA-256
+  `4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43`. You can also
+  place `w600k_r50.onnx` there yourself. Its pretrained weights are licensed for
+  **non-commercial research use only** — the download script prints this notice,
+  and it is your responsibility to comply.
+- **Pipeline.** YuNet detects each face and its five landmarks, a similarity
+  transform aligns and crops the face to 112×112, and ArcFace produces a
+  normalized 512-dimensional embedding. Everything runs on this PC; no face data
+  leaves it.
+- **Grouping.** Each new face is compared by cosine similarity to faces already
+  assigned to people:
+  - score ≥ **auto** threshold (default `0.50`) — added to that person automatically;
+  - **review** threshold (default `0.35`) ≤ score < auto — listed as a suggestion to
+    confirm or dismiss;
+  - below review — a new `Unknown N` person is created (rename it later).
+
+  Thresholds are configurable in **People → Face recognition (ArcFace)**. Manual
+  labels remain authoritative: recognition only adds or links, and **Clear
+  recognition results** removes embeddings and jobs without touching labels or
+  originals.
+- **Interface.** Enable, tune thresholds, queue the library, review suggestions,
+  and clear from the People panel. The photo viewer lists recognized faces and
+  lets you confirm or dismiss suggestions inline.
+- **Storage.** New local tables `faces` (region, landmarks, embedding, person,
+  score, status), `face_jobs` (resumable work), and `recognition_settings`, plus
+  an `auto` flag on `people`. All local and deletable.
+- **API additions.**
+  - `GET /api/recognition?image_id=` — settings, progress, counts, and optional per-photo faces.
+  - `GET /api/recognition/faces?image_id=` — recognized faces for one photo.
+  - `GET /api/recognition/suggestions?offset=` — low-confidence matches awaiting review.
+  - `POST /api/recognition` — actions `enable`, `settings`, `queue`, `detect`, `ignore`, `confirm`, `reject`, `assign`, `unlink`, `clear`.
+
+Recognition is CPU-only and processed one photo at a time, so a large library
+takes time; it resumes across restarts. False merges are possible, so keep the
+review threshold conservative and correct mistakes from an album. Recognition is
+unavailable (and clearly reported) until the ArcFace model is installed; all other
+features work without it.

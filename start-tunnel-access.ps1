@@ -11,6 +11,11 @@ try {
     $env:FRAME_PASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPointer)
     if ($env:FRAME_PASSWORD.Length -lt 16) { throw 'Use at least 16 characters.' }
     $pythonCommand = if (Test-Path '.venv/Scripts/python.exe') { '.\.venv\Scripts\python.exe' } else { 'python' }
+    $model = Join-Path $PSScriptRoot 'data\models\w600k_r50.onnx'
+    if (-not (Test-Path -LiteralPath $model)) {
+        $answer = Read-Host 'Face recognition uses the ArcFace model (~275 MB, non-commercial research license). Download it now? [y/N]'
+        if ($answer -match '^(y|yes)$') { & $pythonCommand download_arcface.py }
+    }
     Write-Host 'Phone login username: frame'
     Write-Host 'Point your Cloudflare Tunnel service at http://127.0.0.1:'$Port
     & $pythonCommand app.py --port $Port --public-origin $PublicOrigin

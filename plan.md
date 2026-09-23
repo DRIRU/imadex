@@ -52,11 +52,12 @@ Embedding implementation is complete and available at http://127.0.0.1:8765. The
 
 - Google OAuth client file/sign-in have not been provided. Actual Drive images have not been indexed or embedded yet.
 - Cloudflare Tunnel is not live. Its hostname/connector and app password still need configuration.
+- The ArcFace model is required for face recognition. `start.ps1` now offers to download it on first run; it can also be fetched with `download_arcface.py`. Detection and all non-recognition features work without it.
 
 ## Limits and future work
 
 - CPU inference; no external inference API. Short English descriptions work best.
-- No OCR, face identification, or automatic tagging.
+- No OCR or automatic tagging. Optional local face recognition (ArcFace) was added later; see the "Face recognition (ArcFace)" section.
 - 64 MB embedding-input limit; unsupported formats are reported as failures. Animated/multipage images use the first frame.
 - Embedded Qdrant targets a personal library; larger collections may need a dedicated Qdrant server.
 - Folder scans are manual; each scan automatically queues new/changed embeddings.
@@ -64,13 +65,13 @@ Embedding implementation is complete and available at http://127.0.0.1:8765. The
 ## People gallery discussion — 2026-09-23
 
 - Rechecked the live `/api/embeddings` endpoint: Qdrant local, CLIP 512 dimensions, no error; total/ready/pending/failed are all zero. Implementation is ready, but the personal Drive library still needs connection and its first scan.
-- User requested an iOS-style People gallery. No face functionality has been implemented.
-- Available next scope: local face detection, manual person labels, and mobile People albums with rename/remove controls. Automatic identity matching and a facial-recognition database are outside the implementation offered here.
-- Keep originals in Drive and any manual labels in the local catalog. This proposed addition has not been started.
+- User requested an iOS-style People gallery. This was implemented (manual labels, YuNet detection, and later ArcFace recognition); the notes below are historical.
+- Available next scope: local face detection, manual person labels, and mobile People albums with rename/remove controls. Automatic identity matching and a facial-recognition database were originally out of scope, but optional local ArcFace recognition with auto-grouping was later implemented at the user's request (see below).
+- Keep originals in Drive and any manual labels in the local catalog. Superseded: this was implemented (see below).
 
 ## People gallery implementation plan
 
-Status: implementation in progress. Manual-label service and API integration are written; verification is pending. User requested implementation on 2026-09-23. Unchecked items below remain unverified.
+Status: implemented and verified. The unchecked items below are the original plan, kept for reference; see "Implementation progress" and the later "Face recognition (ArcFace)" sections for actual results.
 
 ### Scope and expected behavior
 
@@ -79,7 +80,7 @@ Status: implementation in progress. Manual-label service and API integration are
 - Optional local face detection can highlight regions that may contain faces to help the user review a photo. Detection does not assign or suggest names.
 - A new photo starts without person labels. The user can label multiple deliberately selected photos together to reduce repeated work.
 - Keep the existing CLIP visual-search pipeline and Qdrant collection intact. People filtering uses manual SQLite relationships, not CLIP similarity.
-- No face identity embeddings, automatic cross-photo matching, or recognition-database work is included in this plan.
+- No face identity embeddings, automatic cross-photo matching, or recognition-database work is included in this plan as originally written. Optional local ArcFace recognition was later added at the user's request; see "Face recognition (ArcFace)".
 
 ### Phase 1 — Persistent manual people labels
 
@@ -169,4 +170,29 @@ Status: files added, not yet built or verified locally (Docker is not installed 
 - Updated README with a "Run with Docker" section, dependency table, project layout, config reference, and tech stack.
 
 Remaining: user to run `docker compose up --build` and confirm build, first-run model download into the volume, local dashboard access, tests-in-container, and tunnel mode if desired.
+
+## Face recognition (ArcFace) — 2026-09-23
+
+Status: implemented; unit tests pass and real ArcFace inference verified on 2026-09-23.
+
+- User approved ArcFace/InsightFace as the model and "auto grouping for high confidence, ask for low confidence" as the scope.
+- `detection.py` refactored to expose shared `load_model` and `detect_faces` (returns the resized BGR frame plus box, confidence, and 5 landmarks) while `Detector.detect` behavior is unchanged.
+- New `recognition.py`: onnxruntime ArcFace `w600k_r50`, 112×112 similarity alignment from YuNet landmarks (Umeyama, no reflection), normalized 512-d embeddings, cosine matching, auto/review thresholds, `Unknown N` auto-people, resumable `face_jobs` worker, and the `action`/`status`/`suggestions`/`image_faces` API surface.
+- New tables `recognition_settings`, `faces`, `face_jobs`, plus an additive `people.auto` column (schema version 1 retained).
+- Wired into `app.py`: `GET/POST /api/recognition`, `GET /api/recognition/faces`, `GET /api/recognition/suggestions`; recognizer starts with the app and re-queues after scans.
+- UI: People panel "Face recognition (ArcFace)" controls (enable, thresholds, queue, clear, suggestion review) and a recognized-faces list in the viewer.
+- `download_arcface.py` fetches the model with progress and resume support, pins the extracted file SHA-256, and prints its non-commercial license notice; `verify_recognition.py` runs a real YuNet+ArcFace smoke test when the model is present.
+- Tests: `tests/test_recognition.py` adds 10 tests (auto grouping, low-confidence suggestion confirm/reject, new-person creation, clear-keeps-labels, stale source, threshold validation, missing model, alignment, HTTP auth). Full suite: 33 tests pass.
+- Licensing note: InsightFace pretrained weights are non-commercial research only. The app never downloads them silently; `start.ps1` asks once before fetching, and the standalone `download_arcface.py` is always available.
+- `start.ps1` now forwards extra arguments to `app.py` (for example `.\start.ps1 --port 8766`) and, when `data/models/w600k_r50.onnx` is missing, prompts once to download the ArcFace model (defaulting to "no").
+
+Remaining: confirm real grouping quality on the user's own photos, tune threshold defaults (auto 0.50 / review 0.35), check CPU timing on a real library, and verify the mobile layout for the new controls.
+
+## Verification results — 2026-09-23 (recognition)
+
+- Downloaded `buffalo_l.zip` (275.3 MB) via `download_arcface.py`; extracted `w600k_r50.onnx`, SHA-256 `4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43`; ONNX input `['None',3,112,112]`, output `[1,512]`.
+- `verify_recognition.py` passed: 6 faces detected in the fixture, self-similarity 1.0000, cross-face similarity 0.0437 (clear separation between identities).
+- Full automated suite: 33 tests pass (23 prior + 10 recognition).
+- Download throughput from GitHub release CDN measured at ~0.5 MB/s from this location, so the initial 275 MB fetch takes ~9 minutes; the script now resumes and shows progress.
+
 
