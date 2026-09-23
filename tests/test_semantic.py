@@ -8,13 +8,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
-from semantic import SemanticIndex, COLLECTION, fingerprint, normalized
+from semantic import SemanticIndex, COLLECTION, DIMENSIONS, fingerprint, normalized
 from PIL import Image
 from qdrant_client import models
 
 
 def vector(axis):
-    result = [0.0] * 512
+    result = [0.0] * DIMENSIONS
     result[axis] = 1.0
     return result
 
@@ -119,7 +119,7 @@ class SemanticTests(unittest.TestCase):
                 self.index.load_image({**row, 'digest':'wrong-checksum'})
 
     def test_invalid_vectors_rejected(self):
-        for item in [[0.0] * 512, [float('nan')] * 512, [1.0] * 3]:
+        for item in [[0.0] * DIMENSIONS, [float('nan')] * DIMENSIONS, [1.0] * 3]:
             with self.assertRaises(ValueError):
                 normalized(item)
 

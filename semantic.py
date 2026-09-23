@@ -1,4 +1,4 @@
-"""Local CLIP image/text inference and persistent Qdrant vector search."""
+"""Local image/text inference (SigLIP 2 or CLIP) and persistent Qdrant vector search."""
 import hashlib
 import io
 import os
@@ -14,12 +14,30 @@ from qdrant_client import QdrantClient, models
 import accel
 import drive
 
-VISION_MODEL = 'Qdrant/clip-ViT-B-32-vision'
-TEXT_MODEL = 'Qdrant/clip-ViT-B-32-text'
-MODEL_VERSION = 'clip-vit-b32-fastembed-0.8.1-rgb-v1'
-COLLECTION = 'images_clip_b32_v1'
-DIMENSIONS = 512
+MODELS = {
+    'clip': {'vision': 'Qdrant/clip-ViT-B-32-vision', 'text': 'Qdrant/clip-ViT-B-32-text', 'dimensions': 512,
+             'version': 'clip-vit-b32-fastembed-0.8.1-rgb-v1', 'collection': 'images_clip_b32_v1'},
+    'siglip2': {'vision': 'google/siglip2-base-patch16-224', 'text': 'google/siglip2-base-patch16-224',
+                'dimensions': 768, 'version': 'siglip2-base-patch16-224-fastembed-0.8.1-rgb-v1',
+                'collection': 'images_siglip2_base_v1'},
+}
+DEFAULT_MODEL = 'siglip2'
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
+
+
+def select(name):
+    key = (name or DEFAULT_MODEL).strip().lower()
+    if key not in MODELS:
+        raise ValueError('Unknown image model "' + str(name) + '". Choose one of: ' + ', '.join(sorted(MODELS)))
+    return MODELS[key]
+
+
+ACTIVE = select(os.environ.get('IMAGE_INDEX_MODEL'))
+VISION_MODEL = ACTIVE['vision']
+TEXT_MODEL = ACTIVE['text']
+MODEL_VERSION = ACTIVE['version']
+COLLECTION = ACTIVE['collection']
+DIMENSIONS = ACTIVE['dimensions']
 
 
 class ModelUnavailable(ValueError):

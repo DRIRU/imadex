@@ -17,6 +17,8 @@ services:
       QDRANT_URL: "${QDRANT_URL:-}"
       QDRANT_API_KEY: "${QDRANT_API_KEY:-}"
       QDRANT_COLLECTION: "${QDRANT_COLLECTION:-}"
+      # Image/text encoder: siglip2 (default) or clip.
+      IMAGE_INDEX_MODEL: "${IMAGE_INDEX_MODEL:-}"
     healthcheck:
       test:
         - CMD

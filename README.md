@@ -2,7 +2,7 @@
 
 A local-first personal image library. `imadex` runs a small dashboard on your PC,
 keeps the original photos in **Google Drive** (or on local disk), and builds a
-private **CLIP embedding index** on this machine so you can find pictures by
+private **image embedding index** on this machine so you can find pictures by
 describing them in plain English.
 
 It recursively indexes folders, filters by image format, streams previews and
@@ -38,7 +38,7 @@ Drive access needs the network.
 ## Features
 
 - **Natural-language visual search.** Describe an image ("a beach at sunset")
-  and rank your collection by CLIP cosine similarity.
+  and rank your collection by embedding cosine similarity (SigLIP 2 by default).
 - **Google Drive source.** Read-only OAuth 2.0 (PKCE); originals stay in Drive
   and are streamed on demand, never written to disk.
 - **Local-folder source.** Index any folder on the PC; small JPEG thumbnails are
@@ -67,10 +67,10 @@ Python dependencies ([`requirements.txt`](requirements.txt)):
 | Package                  | Version   | Purpose                                     |
 | ------------------------ | --------- | ------------------------------------------- |
 | `Pillow`                  | 12.2.0      | Decoding, EXIF orientation, thumbnails            |
-| `fastembed`               | 0.8.1       | ONNX CPU inference for CLIP image/text            |
+| `fastembed`               | 0.8.1       | ONNX inference for SigLIP 2 / CLIP image/text      |
 | `qdrant-client`           | 1.19.1      | Embedded vector store (local mode)                |
 | `opencv-python-headless`  | 4.11.0.86   | YuNet face detection + face alignment             |
-| `onnxruntime`             | 1.30.0      | Runs CLIP and ArcFace (CPU; swap for `onnxruntime-gpu` for CUDA) |
+| `onnxruntime`             | 1.30.0      | Runs SigLIP 2/CLIP and ArcFace (CPU; swap for `onnxruntime-gpu` for CUDA) |
 
 ---
 
@@ -112,9 +112,10 @@ app's local-only design. The container itself binds `0.0.0.0` (via
 or your configured public origin.
 
 - **State is persisted** through the `./data:/app/data` volume, so the SQLite
-  catalog, Qdrant vectors, thumbnails, CLIP weights, and OAuth files survive
+  catalog, Qdrant vectors, thumbnails, model weights, and OAuth files survive
   rebuilds. Put `data/google-client.json` on the host before connecting Drive.
-- **First run downloads ~600 MB** of CLIP weights (and a ~233 KB YuNet model on
+- **First run downloads ~1.5 GB** of SigLIP 2 weights (~0.6 GB for CLIP) plus a
+  ~233 KB YuNet model on
   first face detection) into `./data/models/`. The healthcheck reports healthy
   once the HTTP server is answering, which can happen before weights finish.
 - **Stop** with `Ctrl+C` or `docker compose down`; **rebuild** after code
@@ -143,13 +144,13 @@ docker compose run --rm --entrypoint python imadex -m unittest discover -s tests
 imadex/
 ├─ app.py                  HTTP server, SQLite catalog, scanning, REST + static serving
 ├─ drive.py                Read-only Google Drive client (OAuth 2.0 with PKCE)
-├─ semantic.py             CLIP image/text embeddings + Qdrant vector search
+├─ semantic.py             SigLIP 2/CLIP image-text embeddings + Qdrant vector search
 ├─ people.py               Manual People albums: labels, covers, merge/delete
 ├─ detection.py            Optional local YuNet face-region detection
 ├─ recognition.py          Optional ArcFace face recognition and auto-grouping
 ├─ download_arcface.py     Fetch the ArcFace model (accepts its license)
 ├─ backup_catalog.py       Consistent SQLite-only catalog backup
-├─ verify_embeddings.py    Real-model smoke test (CLIP + Qdrant, temp catalog)
+├─ verify_embeddings.py    Real image-model + Qdrant smoke test (temp catalog)
 ├─ verify_detection.py     Real YuNet face-detection smoke test
 ├─ verify_recognition.py   Real ArcFace face-embedding smoke test
 ├─ requirements.txt        Pinned Python dependencies
@@ -178,7 +179,7 @@ imadex/
 └─ data/                   Runtime state — created on first launch (gitignored)
    ├─ catalog.sqlite3      Metadata source of truth (WAL)
    ├─ vectors/             Qdrant local collection
-   ├─ models/              Cached CLIP and YuNet ONNX weights
+   ├─ models/              Cached SigLIP 2/CLIP, YuNet, and ArcFace weights
    ├─ thumbnails/          Cached JPEG thumbnails for local sources
    ├─ google-client.json   Your Desktop OAuth client (you provide)
    └─ google-token.json    OAuth tokens (written after sign-in)
@@ -197,11 +198,15 @@ runs in-process — there is no Docker container, cloud vector account, or
 separate server to start. SQLite (`data/catalog.sqlite3`) remains the source of
 truth for metadata, tags, favorites, and embedding job state.
 
-**Models.** [FastEmbed](https://qdrant.github.io/fastembed/) 0.8.1 using
-`Qdrant/clip-ViT-B-32-vision` for pixels and the paired
-`Qdrant/clip-ViT-B-32-text` for search descriptions. Both emit 512-dimensional
-vectors in the same space; vectors are normalized and ranked by cosine
-similarity. Inference runs on the CPU via ONNX Runtime using up to four threads.
+**Models.** [FastEmbed](https://qdrant.github.io/fastembed/) 0.8.1 runs a paired
+image/text dual encoder. The default is **SigLIP 2**
+(`google/siglip2-base-patch16-224`, 768-dimensional, Apache-2.0, multilingual);
+set `IMAGE_INDEX_MODEL=clip` to use the older
+`Qdrant/clip-ViT-B-32-vision` / `Qdrant/clip-ViT-B-32-text` pair
+(512-dimensional). Both towers emit vectors in the same space; vectors are
+normalized and ranked by cosine similarity. Each model writes to its own Qdrant
+collection, so switching re-indexes once without mixing dimensions. Inference runs
+via ONNX Runtime (CPU by default; see GPU acceleration below).
 
 See FastEmbed's [image support](https://qdrant.github.io/fastembed/examples/Image_Embedding/)
 and [supported models](https://qdrant.github.io/fastembed/examples/Supported_Models/).
@@ -213,10 +218,10 @@ and [supported models](https://qdrant.github.io/fastembed/examples/Supported_Mod
 2. Queue new or changed images. Drive originals are fetched into memory through
    the authenticated API, verified against their checksum when available, EXIF
    re-oriented, and converted to RGB. Local images are read from their paths.
-3. Generate a CLIP image vector locally. Only vectors and processing state are
+3. Generate an image vector locally. Only vectors and processing state are
    persisted; Drive originals are not written to disk. Identical bytes reuse an
    existing embedding.
-4. Encode the search description with the paired CLIP text model and ask Qdrant
+4. Encode the search description with the paired text model and ask Qdrant
    for the closest image vectors. Folder, format, favorites, and duplicate
    filters still apply; removed/outdated vectors are excluded.
 
@@ -232,7 +237,7 @@ fully offline except for Google Drive access.
 ### GPU acceleration (optional)
 
 By default inference runs on the CPU via ONNX Runtime using up to four threads.
-You can optionally use an NVIDIA GPU for the CLIP and ArcFace models:
+You can optionally use an NVIDIA GPU for the SigLIP 2/CLIP and ArcFace models:
 
 1. Uninstall the CPU package and install the GPU build (they conflict):
    `pip uninstall onnxruntime` then `pip install onnxruntime-gpu`, plus a matching
@@ -411,6 +416,7 @@ credentials never leave the PC.
 | `IMAGE_INDEX_DATA` | `./data` | Override the runtime data directory. |
 | `IMAGE_INDEX_HOST` | `127.0.0.1` | Env equivalent of `--host`. |
 | `IMAGE_INDEX_PROVIDER` | `auto` | ONNX provider: `auto`, `cpu`, or `cuda`. |
+| `IMAGE_INDEX_MODEL` | `siglip2` | Image/text encoder: `siglip2` or `clip`. |
 | `QDRANT_URL` | – | External Qdrant URL; empty uses embedded local mode. |
 | `QDRANT_API_KEY` | – | API key for the external Qdrant server, if any. |
 | `QDRANT_COLLECTION` | `images_clip_b32_v1` | Collection name. |
@@ -468,7 +474,7 @@ Known limits:
 - Originals over **64 MB**, and formats Pillow cannot decode, are reported as
   failed rather than silently skipped. Animated/multipage images use the first
   frame.
-- Embedding uses CLIP resize/crop preprocessing, so tiny details and text can be
+- Embedding uses the model's resize/crop preprocessing, so tiny details and text can be
   missed.
 - Qdrant local mode runs vector search in-process and is intended for a personal
   collection; very large libraries should move to a dedicated Qdrant server.
@@ -490,7 +496,7 @@ the app in your Google account's third-party connections if desired.
 
 Unit/integration tests use temporary images, a real local Qdrant store, and
 deterministic model substitutes for lifecycle tests. `verify_embeddings.py`
-separately runs **actual** CLIP image and text inference, verifies
+separately runs **actual** image and text inference for the selected model, verifies
 color-description ranking, and checks incremental resume against a temporary
 catalog and the shared model cache. `verify_recognition.py` runs real YuNet +
 ArcFace inference on a downloaded fixture. Drive downloads are simulated in
@@ -503,9 +509,10 @@ own credentials and sign-in.
 
 - **"Embedding service is not started."** Run through `start.ps1` or the venv
   Python; the embedding dependencies are required.
-- **First visual search is slow.** The CLIP weights (~600 MB) download on first
+- **First visual search is slow.** The SigLIP 2 weights (~1.5 GB; ~0.6 GB for
+  CLIP) download on first
   use into `data/models/`. Later runs are offline.
-- **"Could not load CLIP."** Check the internet connection on first use and
+- **"Could not load the visual model."** Check the internet connection on first use and
   confirm `data/models/` is writable, then retry.
 - **Google refresh rejected / sign-in fails.** Testing-mode refresh tokens
   expire after ~7 days; reconnect from the PC dashboard.
@@ -520,7 +527,7 @@ own credentials and sign-in.
 ## Tech stack
 
 Python 3.12 · [Pillow](https://python-pillow.org/) ·
-[FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime, CLIP ViT-B/32) ·
+[FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime; SigLIP 2 default, CLIP optional) ·
 [Qdrant](https://qdrant.tech/) (embedded local or external server) · SQLite · OpenCV (YuNet face
 detection and alignment) · [InsightFace](https://github.com/deepinsight/insightface)
 ArcFace (face recognition) · vanilla HTML/CSS/JS front end · Google Drive API

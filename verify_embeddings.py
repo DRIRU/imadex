@@ -1,4 +1,4 @@
-"""Run a real CLIP/Qdrant smoke test without touching the personal catalog."""
+"""Run a real image-model/Qdrant smoke test without touching the personal catalog."""
 import tempfile
 from pathlib import Path
 import app
@@ -8,7 +8,7 @@ from semantic import SemanticIndex
 
 def main():
     old_data = app.DATA
-    with tempfile.TemporaryDirectory(prefix='frame-clip-verification-') as temporary:
+    with tempfile.TemporaryDirectory(prefix='imadex-model-verification-') as temporary:
         app.DATA = Path(temporary) / 'data'
         app.initialize()
         pictures = Path(temporary) / 'pictures'
@@ -24,6 +24,7 @@ def main():
             index.index_pending()
             status = index.status()
             assert status['ready'] == 3, status
+            print('model: %s (%s dimensions)' % (status['model'], status['dimensions']), flush=True)
             for color in ['red', 'blue', 'green']:
                 result = index.search('a solid ' + color + ' image')
                 names = [(row['name'], round(row['score'], 4)) for row in result['items']]
@@ -31,7 +32,7 @@ def main():
                 assert names[0][0] == color + '.png', names
             index.index_pending()
             assert index.status()['processed'] == 0
-            print('PASS: real 512-dimensional CLIP embeddings, cosine ranking, and incremental resume.', flush=True)
+            print('PASS: real %s-dimensional embeddings, cosine ranking, and incremental resume.' % status['dimensions'], flush=True)
         finally:
             index.close()
             app.DATA = old_data

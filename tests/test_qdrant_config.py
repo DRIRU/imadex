@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
-from semantic import SemanticIndex
+from semantic import COLLECTION, SemanticIndex
 
 
 class FakeClient:
@@ -55,7 +55,7 @@ class QdrantConfigTests(unittest.TestCase):
         self.assertEqual(client.kwargs.get('url'), 'http://qdrant:6333')
         self.assertEqual(client.kwargs.get('api_key'), 'secret')
         self.assertNotIn('path', client.kwargs)
-        self.assertEqual(client.created, 'images_clip_b32_v1')
+        self.assertEqual(client.created, COLLECTION)
         self.assertIn('Qdrant server', index.database)
 
     def test_custom_collection_name(self):

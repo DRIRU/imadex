@@ -12,7 +12,7 @@ Keep this file updated whenever the plan, progress, verification results, or rem
 - Phone access uses Cloudflare Tunnel with authenticated access.
 - Image-content embeddings and natural-language visual search are core functionality.
 - Qdrant local mode persists vectors; SQLite stores metadata and embedding job state.
-- Paired CLIP ViT-B/32 image/text models run through FastEmbed/ONNX Runtime on the CPU, producing normalized 512-dimensional vectors ranked by cosine similarity.
+- Paired image/text models run through FastEmbed/ONNX Runtime, producing normalized vectors ranked by cosine similarity. Originally CLIP ViT-B/32 (512-d); SigLIP 2 base (768-d) is now the default (see the "Image encoder" section).
 
 ## Completed
 
@@ -219,6 +219,33 @@ Status: implemented; not yet exercised against a live server.
 Qdrant GPU facts confirmed from the official docs (v1.13+): GPU accelerates indexing only (not search); GPU builds are Linux x86_64 Docker images only (`gpu-nvidia`/`gpu-amd`) and require the NVIDIA container toolkit; each GPU handles up to 16 GB of vectors per indexing iteration; Qdrant's GPU path uses Vulkan, so neither embedded local mode nor the pip OpenCV build is GPU-accelerated.
 
 Remaining: verify against a running Qdrant server (CPU and, on a Linux host, GPU), confirm index/query correctness with a real library, and note any migration steps when switching stores.
+
+## Image encoder: SigLIP 2 default — 2026-09-23
+
+Status: implemented; the full automated suite is green. Real SigLIP 2 download/inference has not been run in this environment (the ~1.5 GB fetch is slow here); the CLIP path remains verified.
+
+- `semantic.py` gained a model registry and `select()`. `IMAGE_INDEX_MODEL` (`siglip2` default, `clip` optional) chooses the FastEmbed text+image pair, dimensions, model version, and Qdrant collection (`images_siglip2_base_v1`, 768-d by default; `images_clip_b32_v1`, 512-d).
+- No new dependency: FastEmbed 0.8.1 already ships `google/siglip2-base-patch16-224` for both towers (Apache-2.0, ~1.5 GB; vision 0.37 GB + text 1.13 GB). GPU/CPU provider selection and `/api/embeddings` fields are unchanged.
+- Switching models changes the fingerprint/model version, so images re-embed into the new collection; the previous collection is retained so switching back is instant.
+- Config/packaging: `IMAGE_INDEX_MODEL` is passed through Docker Compose and documented in `.env.example`.
+- Tests made dimension-agnostic (`test_semantic.py`, `test_qdrant_config.py`) plus new `tests/test_semantic_models.py`.
+- Docs: README model paragraph, config reference, download sizes, and troubleshooting updated.
+- Remaining: run `verify_embeddings.py` with SigLIP 2 to confirm 768-d ranking and resume; compare CPU timing/quality vs CLIP; optionally surface the active model name in the Visual search panel.
+
+## Phase 2 design: DINOv3 visual similarity (not implemented)
+
+Purpose: image→image only (vision-only, no text tower). Enables "Find similar", visual near-duplicate grouping, and visual clustering — a separate axis beside text search, not a replacement for SigLIP 2/CLIP.
+
+Open decision to settle first: the runtime path. DINOv3 is not in FastEmbed, so either use an ONNX export (verify availability/quality) or add `transformers` + `torch` (a large new dependency). ONNX is preferred to keep the stack lightweight.
+
+- Model: `facebook/dinov3-vitb16-pretrain-lvd1689m` (86M params, 768-d) or ViT-S/16 (21M, 384-d, CPU-friendlier); use the pooled/CLS token, L2-normalized.
+- License: the custom DINOv3 License. Commercial use is allowed, but it requires (a) accepting the gated license on Hugging Face with an account/token, (b) redistribution of the materials/derivatives under the same terms, and (c) a prominent "Built with DINOv3" attribution in the UI/docs.
+- Storage: mirror the embedding lifecycle — a `dino_embeddings` table (image_id, fingerprint, model, status, error, updated) plus collection `images_dinov3_v1`; reuse the bounded image loader and `accel`.
+- Code: new `dinov3.py` (`DinoIndex` worker with enable/queue/clear, status, and by-image search), `download_dinov3.py` (gated download requiring explicit acceptance), and `verify_dinov3.py`.
+- API: `GET /api/dinov3` (status), `POST /api/dinov3` (enable/queue/clear), `GET /api/similar?image_id=&limit=` (ranked visually similar images).
+- UI: "Find similar" action in the photo viewer; results in the existing paginated gallery; opt-in enable with progress/retry like the other pipelines.
+- Effort/risk: much larger than Phase 1 — new model runtime, gated weights, and a new search UI. Best done after Phase 1 is validated against a real library.
+
 
 
 
