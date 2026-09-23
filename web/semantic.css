@@ -1,0 +1,19 @@
+.semanticpanel { display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #3b4931; background: #1a2118; border-radius: 10px; padding: 16px 20px; margin: 0 0 18px; }
+.semanticpanel > div { min-width: 0; flex: 1; }
+.semanticpanel strong { font-size: .875rem; color: var(--accent); margin-right: 16px; }
+#embeddingStatus { font-size: .8125rem; color: #ccd8c1; }
+#embeddingProgress { display: block; width: 100%; max-width: 420px; height: 5px; margin-top: 10px; accent-color: var(--accent); }
+#embeddingMessage { font-size: .8125rem; color: var(--muted); margin: 9px 0 0; overflow-wrap: anywhere; }
+#embeddingErrors { padding: 14px; border: 1px solid #6e5038; background: #392a21; color: #f3c59f; white-space: pre-wrap; font-size: .8125rem; margin-bottom: 16px; max-height: 160px; overflow: auto; }
+.similarity { width: 100%; color: var(--accent); }
+.cardinfo p { flex-wrap: wrap; row-gap: 5px; }
+#searchMode { max-width: 180px; }
+@media (max-width: 700px) {
+  .semanticpanel { padding: 12px; gap: 10px; align-items: flex-start; }
+  .semanticpanel strong, #embeddingStatus { display: block; }
+  #embeddingStatus { margin-top: 5px; font-size: .75rem; }
+  #embeddingMessage { font-size: .75rem; line-height: 1.4; }
+  #indexEmbeddings { max-width: 104px; font-size: .8125rem; padding: 8px; }
+  #searchMode { max-width: none; }
+  #rescan { grid-column: 1 / -1; }
+}

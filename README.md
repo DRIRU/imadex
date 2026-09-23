@@ -1,0 +1,389 @@
+# imadex
+
+A local-first personal image library. `imadex` runs a small dashboard on your PC,
+keeps the original photos in **Google Drive** (or on local disk), and builds a
+private **CLIP embedding index** on this machine so you can find pictures by
+describing them in plain English.
+
+It recursively indexes folders, filters by image format, streams previews and
+originals without copying them to disk, and tracks favorites, tags, and exact
+duplicate copies. Nothing is sent to an external inference API — only Google
+Drive access needs the network.
+
+> The web UI is branded **"frame"**. The repository and Python package are named
+> `imadex`; the two refer to the same application. Tunnel-mode login username is
+> `frame`.
+
+---
+
+## Table of contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Project layout](#project-layout)
+- [How the embedding pipeline works](#how-the-embedding-pipeline-works)
+- [Connect Google Drive](#connect-google-drive)
+- [Using the library](#using-the-library)
+- [Phone access through Cloudflare Tunnel](#phone-access-through-cloudflare-tunnel)
+- [Configuration reference](#configuration-reference)
+- [HTTP API reference](#http-api-reference)
+- [Data, privacy, and limits](#data-privacy-and-limits)
+- [Testing and verification](#testing-and-verification)
+- [Troubleshooting](#troubleshooting)
+- [Tech stack](#tech-stack)
+
+---
+
+## Features
+
+- **Natural-language visual search.** Describe an image ("a beach at sunset")
+  and rank your collection by CLIP cosine similarity.
+- **Google Drive source.** Read-only OAuth 2.0 (PKCE); originals stay in Drive
+  and are streamed on demand, never written to disk.
+- **Local-folder source.** Index any folder on the PC; small JPEG thumbnails are
+  cached under `data/thumbnails/`.
+- **Recursive, resumable scans.** New or changed files are queued automatically;
+  each image is checkpointed independently and failures are reported per file.
+- **Exact duplicate detection** using content checksums (SHA-256 locally, MD5
+  from Drive).
+- **Favorites, tags, folder/format filters, and sorting.**
+- **Text search** over filenames, source paths, tags, and camera metadata.
+- **Local-only server** bound to `127.0.0.1`, with strict Host/Origin checks.
+- **Secure remote access** through Cloudflare Tunnel with HTTP Basic auth.
+
+---
+
+## Requirements
+
+- **Python 3.12 or newer.**
+- Google Drive API access only if you use the Drive source (see
+  [Connect Google Drive](#connect-google-drive)).
+- Roughly **600 MB** of model weights, downloaded on first use and cached under
+  `data/models/`.
+
+Python dependencies ([`requirements.txt`](requirements.txt)):
+
+| Package         | Version  | Purpose                                    |
+| --------------- | -------- | ------------------------------------------ |
+| `Pillow`        | 12.2.0   | Decoding, EXIF orientation, thumbnails     |
+| `fastembed`     | 0.8.1    | ONNX CPU inference for CLIP image/text     |
+| `qdrant-client` | 1.19.1   | Embedded vector store (local mode)         |
+
+---
+
+## Quick start
+
+```powershell
+cd C:\Users\Jezt\Documents\sangeeth\imadex
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
+```
+
+Open <http://127.0.0.1:8765>. Alternatively run `start.ps1`, which creates the
+virtual environment on first launch and then starts the server.
+
+- Stop with `Ctrl+C` in the terminal.
+- Use a different port with `.\.venv\Scripts\python.exe app.py --port 8766`.
+- **Always use the project virtual environment** — it holds the embedding
+  dependencies.
+
+---
+
+## Project layout
+
+```
+imadex/
+├─ app.py                  HTTP server, SQLite catalog, scanning, REST + static serving
+├─ drive.py                Read-only Google Drive client (OAuth 2.0 with PKCE)
+├─ semantic.py             CLIP image/text embeddings + Qdrant vector search
+├─ verify_embeddings.py    Real-model smoke test (CLIP + Qdrant, temp catalog)
+├─ requirements.txt        Pinned Python dependencies
+├─ start.ps1               Create venv (first run), install deps, run the server
+├─ start-tunnel-access.ps1 Start in authenticated tunnel mode with a password
+├─ server.log              Server output (gitignored)
+├─ web/                    Static front end (no build step)
+│  ├─ index.html           Dashboard shell
+│  ├─ app.js               Client logic, polling, viewer, search
+│  ├─ style.css            Desktop styling
+│  ├─ mobile.css           Responsive / phone layout
+│  ├─ semantic.css         Visual-search panel styling
+│  └─ favicon.svg
+├─ tests/
+│  ├─ test_catalog.py      Catalog, scanning, API, duplicates, security
+│  └─ test_semantic.py     Embedding lifecycle with deterministic model stubs
+└─ data/                   Runtime state — created on first launch (gitignored)
+   ├─ catalog.sqlite3      Metadata source of truth (WAL)
+   ├─ vectors/             Qdrant local collection
+   ├─ models/              Cached CLIP ONNX weights
+   ├─ thumbnails/          Cached JPEG thumbnails for local sources
+   ├─ google-client.json   Your Desktop OAuth client (you provide)
+   └─ google-token.json    OAuth tokens (written after sign-in)
+```
+
+The web server binds **only to `127.0.0.1`**. `data/` and the OAuth files are
+never served by the web server.
+
+---
+
+## How the embedding pipeline works
+
+**Vector database.** Qdrant in *local mode*, persisted under `data/vectors/`. It
+runs in-process — there is no Docker container, cloud vector account, or
+separate server to start. SQLite (`data/catalog.sqlite3`) remains the source of
+truth for metadata, tags, favorites, and embedding job state.
+
+**Models.** [FastEmbed](https://qdrant.github.io/fastembed/) 0.8.1 using
+`Qdrant/clip-ViT-B-32-vision` for pixels and the paired
+`Qdrant/clip-ViT-B-32-text` for search descriptions. Both emit 512-dimensional
+vectors in the same space; vectors are normalized and ranked by cosine
+similarity. Inference runs on the CPU via ONNX Runtime using up to four threads.
+
+See FastEmbed's [image support](https://qdrant.github.io/fastembed/examples/Image_Embedding/)
+and [supported models](https://qdrant.github.io/fastembed/examples/Supported_Models/).
+
+**Pipeline:**
+
+1. Scan a selected folder (and subfolders) to collect file IDs, metadata, and
+   content checksums.
+2. Queue new or changed images. Drive originals are fetched into memory through
+   the authenticated API, verified against their checksum when available, EXIF
+   re-oriented, and converted to RGB. Local images are read from their paths.
+3. Generate a CLIP image vector locally. Only vectors and processing state are
+   persisted; Drive originals are not written to disk. Identical bytes reuse an
+   existing embedding.
+4. Encode the search description with the paired CLIP text model and ask Qdrant
+   for the closest image vectors. Folder, format, favorites, and duplicate
+   filters still apply; removed/outdated vectors are excluded.
+
+Each embedding carries a fingerprint that includes the model/preprocessing
+version, so changing content or the model invalidates stale vectors. The
+**Visual search** panel shows ready/total counts, progress, and per-file
+failures; **Index images** backfills and retries failures. Existing vectors
+survive restarts.
+
+Model weights download on first use into `data/models/`. Subsequent inference is
+fully offline except for Google Drive access.
+
+---
+
+## Connect Google Drive
+
+The dashboard needs its own OAuth client. A Google Drive connection elsewhere
+does **not** provide credentials to this standalone application.
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create or
+   select a project.
+2. Enable the **Google Drive API** under *APIs & Services*.
+3. Configure the Google Auth Platform branding and audience. For a personal
+   account, choose **External** and add your own email as a test user while the
+   app is in *Testing*.
+4. Under *Clients*, create an OAuth client of type **Desktop app** and download
+   its JSON configuration.
+5. Save that file as `data/google-client.json`. The `data` folder is created on
+   first launch. **Do not commit it or paste it into chat.**
+6. Click **Connect Google Drive** and finish sign-in in your browser.
+7. Click **Add Drive folder**, then paste the folder's Google Drive URL or ID.
+   The app indexes that folder and all ordinary subfolders.
+
+Authorization uses OAuth with PKCE, a random `state`, and a loopback callback.
+The app requests `drive.readonly` because indexing a folder tree and reading
+private image bytes requires access beyond individually opened files. This scope
+grants read access across Drive, but the app indexes only the folders you add
+and never writes to your Drive. Google may show an unverified-app screen for a
+personal test application.
+
+> Google's External/Testing OAuth refresh tokens commonly **expire after seven
+> days**. Reconnect if Google rejects a refresh. Broader distribution or hosting
+> needs a separate auth/deployment design and may require OAuth verification. See
+> Google's [native app OAuth guide](https://developers.google.com/identity/protocols/oauth2/native-app)
+> and [Drive scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
+
+---
+
+## Using the library
+
+- Select a folder and click **Scan folder** to refresh its index. Scans run in
+  the background, one at a time, and are manual (no scheduled sync).
+- Open a card for a larger preview, details, favorites, tags, and a link to the
+  original. Arrow keys navigate loaded images; `Esc` closes; `/` focuses search.
+- **Visual search** (default) ranks embedded images by a description such as
+  "a beach at sunset". The result line reports any candidates still awaiting
+  indexing.
+- **Names & tags** matches all typed words across filenames, source paths, local
+  tags, and camera metadata.
+- **Duplicates** are exact checksum matches; visually similar images are not
+  detected. The statistic counts extra copies, while the view lists every file
+  in a duplicate group.
+- Missing or trashed files are hidden after a successful rescan. Interrupted or
+  failed scans never mark unseen files missing. Tags and favorites survive
+  rescans.
+- Drive shortcuts are not traversed. Add ordinary, non-overlapping folder roots.
+
+Scores shown in visual search are **relative similarities, not confidence
+percentages**; unrelated results may still appear lower in the ranking. It works
+best with short English descriptions of scenes, objects, and colors. This is not
+OCR, face identification, or automatic tagging.
+
+---
+
+## Phone access through Cloudflare Tunnel
+
+The mobile layout includes bottom navigation, a folder selector, a two-column
+gallery, 44px touch targets, safe-area spacing, and a full-screen viewer. Swipe
+across a preview to navigate. Previews load small thumbnails; tap **Load
+full-resolution image** only when needed. Status polling pauses in background
+tabs and slows to every 15 seconds when no scan is running.
+
+1. Connect Google Drive **on the PC** first via `http://127.0.0.1:8765`. The
+   Desktop OAuth callback is a loopback address and cannot complete on a phone.
+2. Install `cloudflared` using [Cloudflare's instructions](https://developers.cloudflare.com/tunnel/get-started/),
+   then create a tunnel. For a stable URL, configure a named tunnel public
+   hostname (e.g. `photos.your-domain.com`) with service URL
+   `http://127.0.0.1:8765`. Leave the HTTP Host Header override unset and keep
+   the tunnel token private.
+3. Stop the existing server, then start authenticated mode with your actual
+   hostname:
+
+   ```powershell
+   .\start-tunnel-access.ps1 -PublicOrigin 'https://photos.your-domain.com'
+   ```
+
+   The script prompts for a password (minimum 16 characters) and does not write
+   it to disk or history. Sign in as **frame** with that password. Local browser
+   access also requires the password while tunnel mode is enabled.
+4. Start your Cloudflare connector and open the HTTPS URL on your phone. The PC
+   and connector must remain running. The tunnel forwards to loopback; no
+   inbound firewall port or `0.0.0.0` bind is required.
+
+The app validates `Host` and `Origin` and requires HTTP Basic auth on every
+route, including thumbnails and originals. Basic auth relies on the tunnel's
+HTTPS connection. Never publish the app in ordinary local mode by rewriting the
+tunnel's Host header to `localhost`. For a persistent deployment you can also
+restrict the hostname to your email with Cloudflare Access. Do not add a
+Cloudflare cache rule that overrides the app's private/no-store cache policy.
+
+For temporary testing, [Quick Tunnels](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/)
+generate a random HTTPS URL; stop any unprotected server first and restart
+`imadex` with that exact origin. A new URL requires restarting with the new
+origin. Quick Tunnels are for testing only.
+
+No tunnel is created or published automatically by this repository, and Google
+credentials never leave the PC.
+
+---
+
+## Configuration reference
+
+| Setting | Default | Purpose |
+| ------- | ------- | ------- |
+| `--port` | `8765` | HTTP listen port (loopback only). |
+| `--public-origin` | – | Exact HTTPS origin allowed for tunnel mode. |
+| `IMAGE_INDEX_DATA` | `./data` | Override the runtime data directory. |
+| `FRAME_PUBLIC_ORIGIN` | – | Env equivalent of `--public-origin`. |
+| `FRAME_PASSWORD` | – | Tunnel-mode password (≥16 chars). Required with a public origin. |
+
+Tunnel mode is rejected unless `--public-origin` is a clean `https://host`
+origin and `FRAME_PASSWORD` is at least 16 characters.
+
+---
+
+## HTTP API reference
+
+All endpoints are served on the loopback interface and require an allowed
+`Host`/`Origin`. In tunnel mode, every route additionally requires HTTP Basic
+auth (`frame:<password>`). JSON responses set `Cache-Control: no-store`.
+
+| Method | Path | Description |
+| ------ | ---- | ----------- |
+| `GET` | `/` and `/app.js`, `/style.css`, `/mobile.css`, `/semantic.css`, `/favicon.svg` | Static dashboard assets. |
+| `GET` | `/api/status` | Current scan status (running, processed, errors, message). |
+| `GET` | `/api/library` | Folders, aggregate stats, available formats. |
+| `GET` | `/api/images` | Paged image list. Query: `q`, `mode=semantic\|text`, `folder`, `format`, `view=favorites\|duplicates`, `sort`, `offset`. |
+| `GET` | `/api/drive` | Drive configuration/connection state. |
+| `GET` | `/api/embeddings` | Visual-index progress and per-model status. |
+| `GET` | `/image/{id}` | Stream the original (Drive or local). |
+| `GET` | `/thumb/{id}` | Stream a preview thumbnail. |
+| `GET` | `/oauth/callback` | OAuth redirect target (PKCE). |
+| `POST` | `/api/drive/connect` | Begin Google sign-in; returns the auth URL. PC-only. |
+| `POST` | `/api/folders` | Add a folder. Body: `{source:'drive'\|'local', path}`. |
+| `POST` | `/api/scan` | Start a background scan. Body: `{folder_id}`. |
+| `POST` | `/api/image` | Update `favorite` and/or `tags`. Body: `{id, favorite?, tags?}`. |
+| `POST` | `/api/embeddings` | Queue indexing / retry failed embeddings. |
+
+`POST` requests must send `Content-Type: application/json` and a body ≤ 16 KB.
+
+---
+
+## Data, privacy, and limits
+
+Where things live:
+
+- **Google Drive:** original images and folder organization.
+- **This PC:** SQLite metadata catalog, Qdrant vectors (`data/vectors/`), model
+  weights (`data/models/`), thumbnails, favorites, tags, and OAuth config/
+  tokens. Protect `data/` with your Windows account permissions.
+- **Browser:** image/thumbnail responses may be cached for five minutes. The
+  server streams Drive previews and originals without writing them to disk.
+- **Local-folder sources:** originals are untouched; JPEG thumbnails are written
+  under `data/thumbnails/`.
+
+Known limits:
+
+- Originals over **64 MB**, and formats Pillow cannot decode, are reported as
+  failed rather than silently skipped. Animated/multipage images use the first
+  frame.
+- Embedding uses CLIP resize/crop preprocessing, so tiny details and text can be
+  missed.
+- Qdrant local mode runs vector search in-process and is intended for a personal
+  collection; very large libraries should move to a dedicated Qdrant server.
+- Run only **one** app process against a given `data/` directory. Stop the app
+  before backing up `catalog.sqlite3` and `data/vectors/` together.
+
+To disconnect Drive: stop the app, delete `data/google-token.json`, and revoke
+the app in your Google account's third-party connections if desired.
+
+---
+
+## Testing and verification
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe verify_embeddings.py
+```
+
+Unit/integration tests use temporary images, a real local Qdrant store, and
+deterministic model substitutes for lifecycle tests. `verify_embeddings.py`
+separately runs **actual** CLIP image and text inference, verifies
+color-description ranking, and checks incremental resume against a temporary
+catalog and the shared model cache. Drive downloads are simulated in tests;
+live Google OAuth, folder access, and private image streaming require your own
+credentials and sign-in.
+
+---
+
+## Troubleshooting
+
+- **"Embedding service is not started."** Run through `start.ps1` or the venv
+  Python; the embedding dependencies are required.
+- **First visual search is slow.** The CLIP weights (~600 MB) download on first
+  use into `data/models/`. Later runs are offline.
+- **"Could not load CLIP."** Check the internet connection on first use and
+  confirm `data/models/` is writable, then retry.
+- **Google refresh rejected / sign-in fails.** Testing-mode refresh tokens
+  expire after ~7 days; reconnect from the PC dashboard.
+- **"Add your Google Desktop OAuth client file."** Save the Desktop-app client
+  JSON as `data/google-client.json`.
+- **A scan marks nothing missing.** That is intentional: only successful scans
+  hide unseen files, so interrupted work is never destructive.
+- **Port already in use.** Choose another port with `--port`.
+
+---
+
+## Tech stack
+
+Python 3.12 · [Pillow](https://python-pillow.org/) ·
+[FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime, CLIP ViT-B/32) ·
+[Qdrant](https://qdrant.tech/) local mode · SQLite · vanilla HTML/CSS/JS front
+end · Google Drive API (OAuth 2.0 + PKCE) · Cloudflare Tunnel for remote access.
