@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
             expected = 'Basic ' + base64.b64encode(('frame:' + password).encode()).decode()
             if not hmac.compare_digest(self.headers.get('Authorization', '').encode(), expected.encode()):
                 self.send_response(401)
-                self.send_header('WWW-Authenticate', 'Basic realm="Frame personal library", charset="UTF-8"')
+                self.send_header('WWW-Authenticate', 'Basic realm="Imadex personal library", charset="UTF-8"')
                 self.send_header('Cache-Control', 'no-store')
                 self.end_headers()
                 return False
@@ -399,7 +399,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond({'ok': True})
             if self.path == '/api/drive/connect':
                 if not self.on_pc():
-                    raise ValueError('Connect Google Drive on the PC running Frame at http://127.0.0.1:' + str(self.server.server_port) + '. Once connected, you can browse from your phone.')
+                    raise ValueError('Connect Google Drive on the PC running Imadex at http://127.0.0.1:' + str(self.server.server_port) + '. Once connected, you can browse from your phone.')
                 return self.respond({'url': drive.authorize(DATA, self.server.server_port)})
             with db() as conn:
                 if self.path == '/api/folders':

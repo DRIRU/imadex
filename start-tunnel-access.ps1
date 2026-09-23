@@ -4,7 +4,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
-$securePassword = Read-Host 'Choose your Frame password (at least 16 characters)' -AsSecureString
+$securePassword = Read-Host 'Choose your Imadex password (at least 16 characters)' -AsSecureString
 $passwordPointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
 $previousPassword = $env:FRAME_PASSWORD
 try {
@@ -19,7 +19,7 @@ try {
     Write-Host 'Phone login username: frame'
     Write-Host 'Point your Cloudflare Tunnel service at http://127.0.0.1:'$Port
     & $pythonCommand app.py --port $Port --public-origin $PublicOrigin
-    if ($LASTEXITCODE -ne 0) { throw 'Frame could not start. Check the message above.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Imadex could not start. Check the message above.' }
 } finally {
     $env:FRAME_PASSWORD = $previousPassword
     [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPointer)

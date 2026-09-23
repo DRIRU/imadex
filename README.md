@@ -10,9 +10,8 @@ originals without copying them to disk, and tracks favorites, tags, and exact
 duplicate copies. Nothing is sent to an external inference API — only Google
 Drive access needs the network.
 
-> The web UI is branded **"frame"**. The repository and Python package are named
-> `imadex`; the two refer to the same application. Tunnel-mode login username is
-> `frame`.
+> The web UI and this project are branded **imadex**. Tunnel mode still signs in
+> with the username `frame` for backward compatibility.
 
 ---
 
