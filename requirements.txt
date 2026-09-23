@@ -1,3 +1,4 @@
 Pillow==12.2.0
 fastembed==0.8.1
 qdrant-client==1.19.1
+opencv-python-headless==4.11.0.86

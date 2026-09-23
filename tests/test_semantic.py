@@ -123,6 +123,19 @@ class SemanticTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 normalized(item)
 
+    def test_manual_person_filter_intersects_vector_search(self):
+        from people import People, image_revision, LIVE
+        people = People(app.db)
+        person = people.mutate({'action':'create','name':'Manual label'})['id']
+        with app.db() as conn:
+            row = conn.execute("SELECT * FROM images WHERE name='blue.png'").fetchone()
+        people.mutate({'action':'assign','person_id':person,'images':[{'id':row['id'],'revision':image_revision(row)}]})
+        self.index.index_pending()
+        where = 'missing=0 AND id IN (SELECT ip.image_id FROM image_people ip JOIN images i ON i.id=ip.image_id WHERE ip.person_id=? AND '+LIVE+')'
+        result = self.index.search('red', where, [person])
+        self.assertEqual(result['total'],1)
+        self.assertEqual(result['items'][0]['name'],'blue.png')
+
 
 if __name__ == '__main__':
     unittest.main()

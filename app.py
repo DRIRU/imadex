@@ -13,6 +13,7 @@ import hmac
 from contextlib import contextmanager
 from datetime import datetime
 import drive
+import people
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -26,6 +27,7 @@ scan_lock = threading.Lock()
 status_lock = threading.Lock()
 scan_status = {'running': False, 'processed': 0, 'errors': [], 'message': 'Ready to index'}
 semantic_index = None
+face_detector = None
 
 
 def configure_access(server, public_origin=None, password=None):
@@ -46,6 +48,8 @@ def configure_access(server, public_origin=None, password=None):
 def db():
     conn = sqlite3.connect(DATA / 'catalog.sqlite3', timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.create_function("content_revision", 4, people.revision, deterministic=True)
     try:
         with conn:
             yield conn
@@ -71,6 +75,9 @@ def initialize():
         columns = {row[1] for row in conn.execute('PRAGMA table_info(images)')}
         if 'drive_id' not in columns:
             conn.execute('ALTER TABLE images ADD COLUMN drive_id TEXT')
+        people.migrate(conn)
+        from detection import migrate as migrate_detection
+        migrate_detection(conn)
 
 
 def scan_drive(folder_id, root_id):
@@ -257,6 +264,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if url.path == '/api/drive':
                 return self.respond({**drive.state(DATA), 'can_connect': self.on_pc()})
+            if url.path == '/api/people':
+                return self.respond(people.People(db).listing(params.get('q', ''), params.get('offset', 0)))
+            if re.fullmatch(r'/api/images/\d+/people', url.path):
+                return self.respond(people.People(db).image(int(url.path.split('/')[3])))
+            if url.path == '/api/detection':
+                return self.respond(face_detector.status(params.get('image_id')) if face_detector else {'enabled': False, 'available': False})
             if url.path == '/api/embeddings':
                 if semantic_index is None:
                     return self.respond({'error': 'Embedding service is not started. Run the app using start.ps1.'}, 503)
@@ -287,6 +300,14 @@ class Handler(BaseHTTPRequestHandler):
                         clauses.append('favorite=1')
                     if params.get('view') == 'duplicates':
                         clauses.append('digest IN (SELECT digest FROM images WHERE missing=0 GROUP BY digest HAVING COUNT(*)>1)')
+                    if params.get('person'):
+                        clauses.append('id IN (SELECT ip.image_id FROM image_people ip JOIN images i ON i.id=ip.image_id WHERE ip.person_id=? AND ' + people.LIVE + ')')
+                        values.append(int(params['person']))
+                    if params.get('view') == 'review':
+                        from detection import MODEL as detection_model
+                        clauses.append('id IN (SELECT image_id FROM detections WHERE model=?)')
+                        values.append(detection_model)
+                        clauses.append("id IN (SELECT image_id FROM detections WHERE status='ready' AND region_count>0 AND revision=content_revision(images.digest,images.drive_id,images.size,images.mtime)) AND NOT EXISTS (SELECT 1 FROM image_people ip WHERE ip.image_id=images.id AND ip.revision=content_revision(images.digest,images.drive_id,images.size,images.mtime))")
                     where = ' AND '.join(clauses)
                     order = {'newest': 'mtime DESC,id DESC', 'oldest': 'mtime ASC,id ASC', 'name': 'name COLLATE NOCASE,id', 'largest': 'size DESC,id DESC'}.get(params.get('sort'), 'mtime DESC,id DESC')
                     if params.get('view') == 'duplicates':
@@ -295,9 +316,14 @@ class Handler(BaseHTTPRequestHandler):
                     if semantic_query:
                         if semantic_index is None:
                             return self.respond({'error': 'Embedding service is unavailable. Start the app with start.ps1.'}, 503)
-                        return self.respond(semantic_index.search(params['q'], where, values, offset))
+                        result = semantic_index.search(params['q'], where, values, offset)
+                        for row in result['items']:
+                            row['revision'] = people.image_revision(row)
+                        return self.respond(result)
                     total = conn.execute('SELECT COUNT(*) FROM images WHERE ' + where, values).fetchone()[0]
                     rows = [dict(r) for r in conn.execute('SELECT * FROM images WHERE ' + where + ' ORDER BY ' + order + ' LIMIT 80 OFFSET ?', [*values, offset])]
+                    for row in rows:
+                        row['revision'] = people.image_revision(row)
                     return self.respond({'items': rows, 'total': total})
                 if url.path.startswith('/image/') or url.path.startswith('/thumb/'):
                     row = conn.execute('SELECT * FROM images WHERE id=?', (int(url.path.rsplit('/', 1)[1]),)).fetchone()
@@ -322,7 +348,7 @@ class Handler(BaseHTTPRequestHandler):
                                 pass
                         return
                     return self.send_file(DATA / 'thumbnails' / (row['digest'] + '.jpg') if thumb else Path(row['path']), 'image/jpeg' if thumb else None)
-            static = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/mobile.css': 'mobile.css', '/semantic.css': 'semantic.css', '/favicon.svg': 'favicon.svg'}
+            static = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/mobile.css': 'mobile.css', '/semantic.css': 'semantic.css', '/favicon.svg': 'favicon.svg', '/people.js': 'people.js', '/people.css': 'people.css'}
             if url.path in static:
                 return self.send_file(BASE / 'web' / static[url.path])
             self.respond({'error': 'Not found'}, 404)
@@ -339,6 +365,14 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 16384:
                 raise ValueError('Invalid request size')
             payload = json.loads(self.rfile.read(length))
+            if not isinstance(payload, dict):
+                raise ValueError('JSON object required')
+            if self.path == '/api/people':
+                return self.respond(people.People(db).mutate(payload))
+            if self.path == '/api/detection':
+                if face_detector is None:
+                    raise ValueError('Detection service unavailable')
+                return self.respond(face_detector.action(payload))
             if self.path == '/api/embeddings':
                 if semantic_index is None:
                     raise ValueError('Embedding service is not started. Run the app using start.ps1.')
@@ -412,10 +446,14 @@ if __name__ == '__main__':
     from semantic import SemanticIndex
     semantic_index = SemanticIndex(DATA, db)
     semantic_index.start()
+    from detection import Detector
+    face_detector = Detector(DATA, db, semantic_index.load_image)
+    face_detector.start()
     print(f'Image library: http://127.0.0.1:{args.port}', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
     finally:
+        face_detector.close()
         semantic_index.close()

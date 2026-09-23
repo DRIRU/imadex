@@ -1,0 +1,26 @@
+[hidden]{display:none!important}
+.peopletools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+.peopletools label{flex:1;min-width:180px}.peopletools input{width:100%}
+.peoplegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:16px;margin:20px 0}
+.personCard{display:flex;flex-direction:column;align-items:center;gap:10px;min-height:150px;padding:16px;overflow-wrap:anywhere;min-width:0}
+.personCard img{width:96px;height:96px;object-fit:cover;border-radius:50%}
+.personCard span,.photoPeople p,#peoplePanel p{color:var(--muted);font-size:.875rem;line-height:1.5}
+.selectedPhoto{outline:3px solid var(--accent,#b4f0c8);outline-offset:-3px}
+.selectedPhoto::before{content:'✓ Selected';display:block;padding:8px;background:#b4f0c8;color:#152018}
+.pickerResults{display:flex;flex-direction:column;gap:8px;margin-top:16px}
+.pickerResults button{text-align:left;overflow-wrap:anywhere;white-space:normal}
+.personChip{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:10px 0;border-bottom:1px solid var(--line);padding-bottom:10px}
+.personChip span{flex-basis:100%;overflow-wrap:anywhere}
+.photoPeople{border-top:1px solid var(--line);margin:18px 0;padding-top:10px}
+.photoPeople button{margin:4px 0;max-width:100%;white-space:normal}
+.detectionSettings{border:1px solid var(--line);border-radius:12px;padding:16px;margin:24px 0}
+.detectionSettings summary{cursor:pointer;min-height:44px;display:flex;align-items:center}
+.detectionSettings label{display:flex;gap:12px;align-items:center}.detectionSettings input{width:22px;min-height:22px}
+.detectionSettings button{margin:6px 4px 6px 0}
+#facePreview{position:relative;line-height:0;margin:12px 0}#facePreviewImage{width:100%;display:block;height:auto}
+#faceBoxes{position:absolute;inset:0;pointer-events:none}#faceBoxes span{position:absolute;border:2px solid #b4f0c8;background:#b4f0c820;box-sizing:border-box}
+#personPicker,#personManager,#peopleConfirm{width:480px;max-width:calc(100vw - 24px)}
+#personManager button,#peopleConfirm button,#pickerCreate{margin:8px 0}#personManager select{width:100%;max-width:100%}
+#confirmDescription,#managerSummary{overflow-wrap:anywhere;line-height:1.6}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #b4f0c8;outline-offset:3px}
+@media(max-width:700px){.peoplegrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.personCard{padding:12px 8px}.peopletools button{flex:1;white-space:normal}.peopletools label{flex-basis:100%}.photoPeople input{font-size:16px}.sidebar nav{display:flex}#personPicker,#personManager,#peopleConfirm{box-sizing:border-box}.detectionSettings button{width:100%;margin:6px 0}}

@@ -387,3 +387,95 @@ Python 3.12 · [Pillow](https://python-pillow.org/) ·
 [FastEmbed](https://github.com/qdrant/fastembed) (ONNX Runtime, CLIP ViT-B/32) ·
 [Qdrant](https://qdrant.tech/) local mode · SQLite · vanilla HTML/CSS/JS front
 end · Google Drive API (OAuth 2.0 + PKCE) · Cloudflare Tunnel for remote access.
+
+
+## People albums and optional face detection
+
+Open **People** to create a person, then open a photo and use **Add person**.
+You can attach several names to a photo. **Select photos** enables manual batch
+selection (up to 100 photos); **Label selected photos** assigns a name to that
+exact selection. Selection remains available after a failed request.
+
+Open a People album to combine it with folder, format, favorites, or visual/text
+search filters. **Manage person** supports rename, merge, and deletion; merges
+and deletions show affected counts first. Open a labeled photo inside the album
+to choose **Use as album cover**. The cover falls back to another current photo
+if the chosen photo becomes unavailable or its label is removed. Different
+people can have the same name; the picker includes record IDs to distinguish them.
+
+Labels are manual. New photos have no names. Labels belong to a catalog image ID
+and content revision. Changed content hides old labels from albums until reviewed
+in the photo viewer; missing photos are hidden. Drive renames retain labels when
+the file ID stays the same. Local renames currently create a new catalog entry,
+so labels must be reassigned. Labels are not copied to duplicate files.
+
+In **People → Face detection assistance**, enable optional local detection.
+Use **Find face regions** in a photo, or queue the library from People. A single
+background worker processes persisted jobs and resumes on restart when enabled.
+The review view shows photos with detected regions and no current manual labels;
+it does not determine whether a partially labeled photo has everyone accounted for.
+**Ignore these detections** dismisses a photo's regions. **Clear detection results**
+clears detection jobs/results while keeping labels. Disabling detection stops new
+work and hides regions; already-running inference may finish but will not publish
+results after disable/clear. Retry failed jobs with the library queue button.
+
+Detection uses OpenCV headless 4.11.0.86 and the
+[YuNet 2023mar model](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet),
+licensed under MIT (copy in `licenses/YuNet-LICENSE.txt`). Its 232,589-byte model
+is downloaded on first detection and checked against SHA-256
+`8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4`.
+CPU processing uses an EXIF-normalized RGB image, converts it to BGR, and limits
+its longest side to 1280 pixels. Small, obscured, or side-on faces can be missed;
+false detections can occur. Detection stores normalized rectangles and confidence,
+never identity embeddings or automatically inferred names. Manual labels work
+without detection. The existing 64 MB input limit applies, and Drive pixels are
+read into memory without saving originals. Detection previews use gallery thumbnails.
+
+New SQLite tables in `data/catalog.sqlite3`: `people`, `image_people`,
+`detection_settings`, `detections`, and `project_schema`. Migrations are additive
+and idempotent. Both new schema components start at version 1. Names, labels,
+detection boxes, job errors, and settings remain on the PC. All API routes use
+the same configured authentication and origin checks as the gallery.
+
+API additions:
+
+- `GET /api/people?q=&offset=` returns up to 60 people, counts, covers, and edit versions.
+- `GET /api/images/{id}/people` returns labels, stale flags, and current content revision.
+- `POST /api/people` takes an `action`: create, rename, assign, unassign, cover, merge, delete.
+  Assignment takes `person_id` and `images: [{id, revision}]`; management operations
+  take `person_id` and `version`. Merge also needs `target_id` and `target_version`.
+- `GET /api/images?person={id}` intersects manual membership with other filters.
+- `GET /api/detection?image_id={id}` returns settings/progress and optional regions.
+- `POST /api/detection` supports enable (`enabled` boolean), detect (`image_id`,
+  `revision`), queue, ignore (`image_id`, `revision`), and clear.
+- `GET /api/images?view=review` lists current detections with no current manual labels.
+
+### Catalog backup and restore
+
+For a consistent SQLite-only backup (including People), run:
+
+```powershell
+.\.venv\Scripts\python.exe backup_catalog.py data/backups/catalog-before-people.sqlite3
+```
+
+The command refuses to overwrite a backup and uses SQLite's backup API, so it
+includes committed WAL data even while the app is running. For a full restore
+point, stop the app and copy the entire `data/` directory, including `vectors/`,
+SQLite WAL/SHM files if present, OAuth files, and models. Keep that copy private.
+
+To restore a full snapshot, stop the app, rename the existing `data/` directory
+as a safety copy, and restore the saved directory as `data/`. To restore only the
+catalog, stop the app, move the current catalog and any matching `-wal`/`-shm`
+files to a safety folder, copy the backup as `data/catalog.sqlite3`, then restart
+and rescan/reindex to reconcile image/vector state. Never replace a live database.
+Deleting a person removes their manual labels only; originals remain intact.
+
+Additional real-model verification:
+
+```powershell
+.\.venv\Scripts\python.exe verify_detection.py
+```
+
+This downloads a public-domain NASA fixture in memory and checks single/multiple
+face regions, EXIF rotation, bounds, and a blank image. It never adds test photos
+to your catalog. Live Drive and Cloudflare verification still requires your setup.
