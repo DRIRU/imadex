@@ -25,6 +25,7 @@ Drive access needs the network.
 - [How the embedding pipeline works](#how-the-embedding-pipeline-works)
 - [Connect Google Drive](#connect-google-drive)
 - [Using the library](#using-the-library)
+- [People albums and face recognition](#people-albums-and-optional-face-detection)
 - [Phone access through Cloudflare Tunnel](#phone-access-through-cloudflare-tunnel)
 - [Configuration reference](#configuration-reference)
 - [HTTP API reference](#http-api-reference)
@@ -49,6 +50,13 @@ Drive access needs the network.
   from Drive).
 - **Favorites, tags, folder/format filters, and sorting.**
 - **Text search** over filenames, source paths, tags, and camera metadata.
+- **People albums** with manual labels and optional local YuNet face detection;
+  optional ArcFace recognition auto-groups high-confidence matches and asks about
+  unclear ones.
+- **Embedded or external Qdrant** vector store (`QDRANT_URL`), with optional CPU
+  and GPU server profiles in Docker Compose.
+- **Docker / Docker Compose** packaging, plus optional CUDA acceleration for the
+  embedding and recognition models (CPU fallback).
 - **Local-only server** bound to `127.0.0.1`, with strict Host/Origin checks.
 - **Secure remote access** through Cloudflare Tunnel with HTTP Basic auth.
 

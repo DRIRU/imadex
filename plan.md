@@ -232,6 +232,10 @@ Status: implemented; the full automated suite is green. Real SigLIP 2 download/i
 - Docs: README model paragraph, config reference, download sizes, and troubleshooting updated.
 - Remaining: run `verify_embeddings.py` with SigLIP 2 to confirm 768-d ranking and resume; compare CPU timing/quality vs CLIP; optionally surface the active model name in the Visual search panel.
 
+## Web rebrand (Frame → imadex) — 2026-09-23
+
+Status: done. Visible branding changed to **imadex** (page title, sidebar brand, Drive-connect messages, Basic-auth realm, tunnel prompts) in `web/index.html`, `web/app.js`, `app.py`, and `start-tunnel-access.ps1`. The Basic-auth **username `frame`** and the `FRAME_PASSWORD`/`FRAME_PUBLIC_ORIGIN` environment variables were kept for backward compatibility. README notes this.
+
 ## Phase 2 design: DINOv3 visual similarity (not implemented)
 
 Purpose: image→image only (vision-only, no text tower). Enables "Find similar", visual near-duplicate grouping, and visual clustering — a separate axis beside text search, not a replacement for SigLIP 2/CLIP.
