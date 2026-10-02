@@ -2,6 +2,7 @@ import base64
 import json
 import tempfile
 import threading
+import sys
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -64,6 +65,22 @@ class PerformanceTests(unittest.TestCase):
         stages={s['stage']:s for s in self.r.status()['jobs'][0]['stages']}
         self.assertEqual(stages['model_lock_wait']['total_ms'],200)
         self.assertEqual(stages['embedding']['total_ms'],400)
+
+    def test_parallel_read_totals_do_not_double_count_foreground_wait(self):
+        self.enable()
+        def read():
+            with p.span('source_open'):
+                with p.span('drive_auth'):self.clock.add(.05)
+                self.clock.add(.15)
+        with self.r.job('embeddings') as job:
+            with p.span('prefetch_wait'):p.prefetch_call(job,4,read)
+            with p.span('embedding'):self.clock.add(.1)
+        result=self.r.status()['jobs'][0];stages={s['stage']:s for s in result['stages']}
+        self.assertEqual(stages['prefetch_wait']['total_ms'],200)
+        self.assertEqual(stages['prefetch_source_open']['total_ms'],150)
+        self.assertEqual(stages['prefetch_drive_auth']['total_ms'],50)
+        self.assertIsNone(stages['prefetch_source_open']['share_percent'])
+        self.assertEqual(result['uninstrumented_ms'],0);self.assertEqual(result['largest_stage'],'prefetch_wait')
 
     def test_off_capture_expiry_and_partial_window(self):
         with self.r.job('embeddings'),p.span('decode'):self.clock.add(1)
@@ -151,6 +168,18 @@ class PerformanceTests(unittest.TestCase):
                 self.assertEqual(run.call_args.kwargs['timeout'],1)
             self.assertEqual(self.r.status()['resource_state']['gpu_status'],'unavailable')
             self.assertEqual(len(self.r.status()['resource_state']['samples']),1)
+        finally:self.r.stop=original
+
+    def test_missing_process_dependency_is_identified_without_raw_errors(self):
+        self.r.enabled=True;self.r.resources=True;self.r.detail_until=10
+        class Stop:
+            calls=0
+            def wait(inner,seconds):inner.calls+=1;return inner.calls>1
+        original=self.r.stop;self.r.stop=Stop()
+        try:
+            with patch.object(p.shutil,'which',return_value=None),patch.dict(sys.modules,{'psutil':None}):self.r.sample_loop()
+            state=self.r.status()['resource_state']
+            self.assertEqual(state['process_status'],'unavailable');self.assertEqual(state['process_error'],'dependency_missing')
         finally:self.r.stop=original
 
 

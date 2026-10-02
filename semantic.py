@@ -7,6 +7,8 @@ import time
 from urllib.parse import urlsplit
 from collections import OrderedDict
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, CancelledError
+from contextlib import contextmanager
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -84,6 +86,11 @@ class SemanticIndex:
         self.activity = lambda: {}
         self.queued_at = None
         self.image_calls = 0
+        self.prefetch_workers = int(os.environ.get('IMAGE_INDEX_PREFETCH','2'))
+        self.write_batch_size = int(os.environ.get('IMAGE_INDEX_WRITE_BATCH','4'))
+        self.max_decode_pixels = int(os.environ.get('IMAGE_INDEX_MAX_PIXELS','64000000'))
+        if not 0<=self.prefetch_workers<=2 or not 1<=self.write_batch_size<=16 or not 1<=self.max_decode_pixels<=100000000:
+            raise ValueError('Prefetch must be 0–2, write batch 1–16, and pixel limit 1–100000000.')
         with db() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS image_embeddings(
                 image_id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, model TEXT NOT NULL,
@@ -223,18 +230,32 @@ class SemanticIndex:
             return vector
 
     def load_image(self, row):
+        return self.decode_image(row,self.read_image(row))
+
+    def read_image(self, row, cancel=None):
         if row['size'] > MAX_IMAGE_BYTES:
             raise ValueError('Image exceeds the 64 MB embedding limit.')
         performance.metadata(source='drive' if row['drive_id'] else 'local',bytes=int(row['size'] or 0))
+        if cancel is not None and cancel.is_set():raise CancelledError()
         with performance.span('source_open'):
             if row['drive_id']:
                 stream = drive.request(self.data, 'files/' + row['drive_id'], {'alt': 'media', 'supportsAllDrives': 'true'})
             else:
                 stream = Path(row['path']).open('rb')
         with performance.span('source_read'), stream:
-            raw = stream.read(MAX_IMAGE_BYTES + 1)
+            buffer=io.BytesIO()
+            while buffer.tell()<=MAX_IMAGE_BYTES:
+                if cancel is not None and cancel.is_set():raise CancelledError()
+                chunk=stream.read(min(64*1024,MAX_IMAGE_BYTES+1-buffer.tell()))
+                if not chunk:break
+                buffer.write(chunk)
+            raw=buffer.getvalue()
         if len(raw) > MAX_IMAGE_BYTES:
             raise ValueError('Image exceeds the 64 MB embedding limit.')
+        return raw
+
+    def decode_image(self, row, raw):
+        performance.metadata(source='drive' if row['drive_id'] else 'local',bytes=len(raw))
         with performance.span('checksum'):
             if row['drive_id']:
                 if row['digest'] != row['drive_id'] and hashlib.md5(raw).hexdigest() != row['digest']:
@@ -242,6 +263,8 @@ class SemanticIndex:
             elif hashlib.sha256(raw).hexdigest() != row['digest']:
                 raise ValueError('Image changed on disk. Rescan the folder before indexing.')
         with performance.span('decode'), Image.open(io.BytesIO(raw)) as image:
+            if image.width*image.height>self.max_decode_pixels:
+                raise ValueError('Image exceeds the configured decoded pixel limit.')
             image.seek(0)
             picture = ImageOps.exif_transpose(image)
             if picture.mode in ('RGBA', 'LA') or (picture.mode == 'P' and 'transparency' in picture.info):
@@ -253,10 +276,18 @@ class SemanticIndex:
             return result
 
     def record(self, image_id, signature, status, error=None):
+        self.record_many([(image_id,signature,status,error)])
+
+    def record_many(self, records):
+        if not records:return
         with performance.span('sqlite_commit'), self.db() as conn:
-            conn.execute('''INSERT INTO image_embeddings VALUES(?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
+            self._record_many(conn,records)
+
+    @staticmethod
+    def _record_many(conn, records):
+        conn.executemany('''INSERT INTO image_embeddings VALUES(?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
                 fingerprint=excluded.fingerprint,model=excluded.model,status=excluded.status,error=excluded.error,updated=excluded.updated''',
-                (image_id, signature, MODEL_VERSION, status, error, time.time()))
+                [(image_id,signature,MODEL_VERSION,status,error,time.time()) for image_id,signature,status,error in records])
 
     def rows(self):
         with self.db() as conn:
@@ -318,7 +349,9 @@ class SemanticIndex:
         try:
             with self.db() as conn:
                 job=conn.execute("INSERT INTO job_history(kind,started,status) VALUES('embeddings',?,'running')",(time.time(),)).lastrowid
-            with self.performance.job('embeddings',job_id=job,encoder=MODEL_NAME,backend=self.database,batch_size=1,runtime=accel.mode()) as timing:
+            with self.performance.job('embeddings',job_id=job,encoder=MODEL_NAME,backend=self.database,batch_size=1,runtime=accel.mode(),
+                    prefetch_workers=self.prefetch_workers,write_batch_size=self.write_batch_size,
+                    prefetch_budget_bytes=self.prefetch_workers*MAX_IMAGE_BYTES,max_decode_pixels=self.max_decode_pixels) as timing:
                 timing.queue_wait_ms = queue_wait_ms
                 if self.performance.enabled:
                     try:performance.metadata(**self.activity())
@@ -345,11 +378,9 @@ class SemanticIndex:
                 self.job_lock.release()
 
     def _index_rows(self, timing):
-        processed = failures = 0
         timing.index_counts = (0,0)
         try:
             with performance.span('cleanup'):
-                # Remove vectors for unavailable files, including interrupted previous scans.
                 with self.db() as conn:
                     gone = [r[0] for r in conn.execute('''SELECT e.image_id FROM image_embeddings e
                         LEFT JOIN images i ON i.id=e.image_id WHERE i.id IS NULL OR i.missing=1''')]
@@ -358,68 +389,162 @@ class SemanticIndex:
                         self.client.delete(self.collection, points_selector=models.PointIdsList(points=gone))
                     with self.db() as conn:
                         conn.executemany('DELETE FROM image_embeddings WHERE image_id=?', ((item,) for item in gone))
-            with performance.span('catalog'):
-                rows = self.rows()
-            for row in rows:
-                if self.stop.is_set():
-                    break
-                with performance.image(row['id']):
-                    performance.count('visited')
-                    signature = fingerprint(row)
-                    if row['embedded_fingerprint'] == signature and row['embedding_status'] == 'failed':
-                        performance.count('failed_skipped');continue
-                    with performance.timed_lock(self.vector_lock,'vector_lock_wait'), performance.span('vector_lookup'):
-                        points = self.client.retrieve(self.collection, [row['id']], with_payload=True)
-                    if points and points[0].payload.get('fingerprint') == signature:
-                        if row['embedding_status'] != 'ready' or row['embedded_fingerprint'] != signature:
-                            self.record(row['id'], signature, 'ready')
-                        performance.count('skipped');continue
-                    self.record(row['id'], signature, 'pending')
-                    self.update(message='Embedding ' + row['name'])
-                    result = self._index_image(row,signature)
-                    if result is None:continue
-                    failures += int(not result)
-                    processed += 1
-                    timing.index_counts = (processed,failures)
-                    self.update(processed=processed)
+            with performance.span('catalog'):rows = self.rows()
+            for offset in range(0,len(rows),self.write_batch_size):
+                if self.stop.is_set():break
+                self._index_group(rows[offset:offset+self.write_batch_size],timing)
         finally:
-            timing.index_counts = (processed,failures)
-            if failures:timing.outcome = 'failed'
+            if timing.index_counts[1]:timing.outcome = 'failed'
             elif self.stop.is_set():timing.outcome = 'interrupted'
 
-    def _index_image(self,row,signature):
+    def _index_group(self, rows, timing):
+        with performance.timed_lock(self.vector_lock,'vector_lock_wait'),performance.span('vector_lookup'):
+            points = {p.id:p for p in self.client.retrieve(self.collection,[r['id'] for r in rows],with_payload=True)}
+        entries=[];repairs=[]
+        for row in rows:
+            signature=fingerprint(row)
+            with performance.image(row['id'],measure=False):
+                performance.count('visited')
+                if row['embedded_fingerprint']==signature and row['embedding_status']=='failed':
+                    performance.count('failed_skipped');continue
+                if row['id'] in points and points[row['id']].payload.get('fingerprint')==signature:
+                    if row['embedding_status']!='ready' or row['embedded_fingerprint']!=signature:
+                        repairs.append((row['id'],signature,'ready',None))
+                    performance.count('skipped');continue
+                entries.append({'row':row,'signature':signature,'started':self.performance.clock(),
+                    'vector':None,'reused':False,'error':None,'meta':{}})
+        self.record_many(repairs)
+        if not entries:return
+        # Pending state is durable before any vectors in this group are published.
+        self.record_many([(e['row']['id'],e['signature'],'pending',None) for e in entries])
+        with performance.span('duplicate_lookup'),self.db() as conn:
+            for e in entries:
+                duplicate=conn.execute("SELECT image_id FROM image_embeddings WHERE fingerprint=? AND status='ready' AND image_id<>? LIMIT 1",
+                    (e['signature'],e['row']['id'])).fetchone()
+                if duplicate:
+                    with performance.timed_lock(self.vector_lock,'vector_lock_wait'),performance.span('duplicate_vector'):
+                        reused=self.client.retrieve(self.collection,[duplicate[0]],with_vectors=True)
+                    if reused and reused[0].payload.get('fingerprint')==e['signature']:
+                        e['vector']=reused[0].vector;e['reused']=True
+        vectors={};fatal=None
+        with self._prefetched_reads(entries,timing) as take:
+            for e in entries:
+                if self.stop.is_set():break
+                row=e['row']
+                with performance.image(row['id'],measure=False),performance.span('image_prepare'):
+                    self.update(message='Embedding '+row['name'])
+                    try:
+                        if e['vector'] is None and e['signature'] in vectors:
+                            e['vector']=vectors[e['signature']];e['reused']=True
+                        if e['vector'] is None:
+                            raw=take(row) if row['drive_id'] and self.prefetch_workers else None
+                            try:
+                                with self.decode_image(row,raw) if raw is not None else self.load_image(row) as picture:
+                                    if self.stop.is_set():break
+                                    e['meta']={'width':picture.width,'height':picture.height,'pixels':picture.width*picture.height}
+                                    e['vector']=self.encode_image(picture)
+                                performance.count('inferred')
+                            finally:raw=None
+                        vectors[e['signature']]=e['vector']
+                    except Exception as error:
+                        if self.stop.is_set():break
+                        e['error']=str(error)
+                        if isinstance(error,ModelUnavailable):fatal=error;break
+        self._publish_group([e for e in entries if e['vector'] is not None or e['error'] is not None],timing)
+        if fatal:raise fatal
+
+    @contextmanager
+    def _prefetched_reads(self, entries, timing):
+        # Prefetch only compressed Drive bytes. Exactly one image is decoded at a time.
+        unique={};waiting={};pool=None
+        for e in entries:
+            if e['vector'] is None and e['row']['drive_id']:
+                unique.setdefault(e['signature'],e['row'])
+        iterator=iter(unique.values())
+        def fill():
+            if pool is None or self.stop.is_set():return
+            while len(waiting)<self.prefetch_workers:
+                row=next(iterator,None)
+                if row is None:break
+                waiting[row['id']]=pool.submit(performance.prefetch_call,timing,row['id'],self.read_image,row,self.stop)
+        def take(row):
+            future=waiting.pop(row['id'],None)
+            if future is None:return self.read_image(row,self.stop)
+            try:
+                with performance.span('prefetch_wait'):return future.result()
+            finally:fill()
         try:
-            # Identical image bytes can reuse an existing vector.
-            with performance.span('duplicate_lookup'), self.db() as conn:
-                duplicate = conn.execute("SELECT image_id FROM image_embeddings WHERE fingerprint=? AND status='ready' AND image_id<>? LIMIT 1", (signature, row['id'])).fetchone()
-            reused = []
-            if duplicate:
-                with performance.timed_lock(self.vector_lock,'vector_lock_wait'), performance.span('duplicate_vector'):
-                    reused = self.client.retrieve(self.collection, [duplicate[0]], with_vectors=True)
-            if reused and reused[0].payload.get('fingerprint') == signature:
-                vector = reused[0].vector
-            else:
-                with self.load_image(row) as picture:
-                    vector = self.encode_image(picture)
-                performance.count('inferred')
-            # Never publish an embedding if a concurrent rescan changed its source.
-            with performance.span('revision_check'), self.db() as conn:
-                current = conn.execute('SELECT * FROM images WHERE id=? AND missing=0', (row['id'],)).fetchone()
-            if current is None or fingerprint(current) != signature:
-                performance.count('stale');return None
-            with performance.timed_lock(self.vector_lock,'vector_lock_wait'), performance.span('vector_upsert'):
-                self.client.upsert(self.collection, [models.PointStruct(id=row['id'], vector=vector,
-                    payload={'fingerprint': signature, 'model': MODEL_VERSION})], wait=True)
-            self.record(row['id'], signature, 'ready')
-            performance.count('success')
-            performance.count('reused' if reused and reused[0].payload.get('fingerprint') == signature else 'new_success')
-            return True
-        except ModelUnavailable:
-            performance.count('failed')
-            raise
-        except Exception as error:
-            self.record(row['id'], signature, 'failed', str(error))
-            performance.count('failed');return False
+            if self.prefetch_workers and unique:
+                pool=ThreadPoolExecutor(max_workers=self.prefetch_workers,thread_name_prefix='drive-prefetch')
+                fill()
+            yield take
+        finally:
+            for future in waiting.values():future.cancel()
+            if pool:pool.shutdown(wait=True,cancel_futures=True)
+            waiting.clear()
+
+    def _current_group(self, conn, entries):
+        if not entries:return {}
+        ids=[e['row']['id'] for e in entries]
+        return {r['id']:r for r in conn.execute('SELECT * FROM images WHERE missing=0 AND id IN ('+','.join('?' for _ in ids)+')',ids)}
+
+    def _upsert_entries(self, entries):
+        if not entries:return
+        with performance.timed_lock(self.vector_lock,'vector_lock_wait'),performance.span('vector_upsert'):
+            self.client.upsert(self.collection,[models.PointStruct(id=e['row']['id'],vector=e['vector'],
+                payload={'fingerprint':e['signature'],'model':MODEL_VERSION}) for e in entries],wait=True)
+
+    def _publish_group(self, entries, timing):
+        if not entries:return
+        with performance.span('revision_check'),self.db() as conn:current=self._current_group(conn,entries)
+        live=[e for e in entries if e['row']['id'] in current and fingerprint(current[e['row']['id']])==e['signature']]
+        publish=[e for e in live if e['error'] is None]
+        confirmed=set()
+        try:
+            self._upsert_entries(publish)
+            confirmed.update(e['row']['id'] for e in publish)
+        except Exception:
+            # A server/local failure may have persisted some points. Recover those before
+            # isolating failures with single-point retries; never mark unconfirmed work ready.
+            recovered={}
+            try:
+                with performance.timed_lock(self.vector_lock,'vector_lock_wait'),performance.span('vector_lookup'):
+                    recovered={p.id:p for p in self.client.retrieve(self.collection,[e['row']['id'] for e in publish],with_payload=True)}
+            except Exception:pass
+            for e in publish:
+                point=recovered.get(e['row']['id'])
+                if point and point.payload.get('fingerprint')==e['signature']:
+                    confirmed.add(e['row']['id']);continue
+                try:
+                    with performance.span('revision_check'),self.db() as conn:
+                        latest=self._current_group(conn,[e]).get(e['row']['id'])
+                    if latest is None or fingerprint(latest)!=e['signature']:continue
+                    self._upsert_entries([e])
+                    confirmed.add(e['row']['id'])
+                except Exception as error:e['error']=str(error)
+        outcomes=[];records=[]
+        with performance.span('sqlite_commit'),self.db() as conn:
+            # Serialize the final revision check with catalog writers, after awaited upsert.
+            conn.execute('BEGIN IMMEDIATE')
+            with performance.span('revision_check'):current=self._current_group(conn,entries)
+            for e in entries:
+                row=current.get(e['row']['id'])
+                outcome='stale' if row is None or fingerprint(row)!=e['signature'] or (e['error'] is None and e['row']['id'] not in confirmed) else 'failed' if e['error'] is not None else 'ready'
+                outcomes.append((e,outcome))
+                if outcome!='stale':records.append((e['row']['id'],e['signature'],outcome,e['error']))
+            self._record_many(conn,records)
+        processed,failures=timing.index_counts
+        for e,outcome in outcomes:
+            with performance.image(e['row']['id'],measure=False):
+                performance.metadata(source='drive' if e['row']['drive_id'] else 'local',bytes=int(e['row']['size'] or 0),**e['meta'])
+                with performance.span('image_total',start_time=e['started']):
+                    if outcome=='stale':performance.count('stale');continue
+                    processed+=1
+                    if outcome=='failed':failures+=1;performance.count('failed')
+                    else:
+                        performance.count('success');performance.count('reused' if e['reused'] else 'new_success')
+        timing.index_counts=processed,failures
+        self.update(processed=processed)
 
     def search(self, query, where='missing=0', values=(), offset=0, limit=80):
         if not query.strip() or len(query.strip()) > 500:

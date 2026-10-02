@@ -3,6 +3,7 @@ import io
 import sys
 import tempfile
 import time
+import threading
 import performance
 import unittest
 from pathlib import Path
@@ -99,9 +100,9 @@ class SemanticTests(unittest.TestCase):
         with patch.object(self.index.client,'upsert',side_effect=persist):self.index.index_pending()
         job=self.index.performance.status()['jobs'][0];stages={s['stage']:s for s in job['stages']}
         self.assertGreaterEqual(stages['embedding']['total_ms'],80)
-        self.assertGreaterEqual(stages['vector_upsert']['total_ms'],90)
+        self.assertGreaterEqual(stages['vector_upsert']['total_ms'],30)
         self.assertEqual(stages['embedding']['count'],2)
-        self.assertEqual(stages['vector_upsert']['count'],3)
+        self.assertEqual(stages['vector_upsert']['count'],1)
         self.assertLess(sum(s['total_ms'] for s in stages.values() if s['stage']!='image_total'),job['wall_ms']+1)
         self.assertEqual(self.index.status()['ready'],3)
 
@@ -116,6 +117,113 @@ class SemanticTests(unittest.TestCase):
         self.assertEqual(job['counts']['success'],2)
         with app.db() as c:blue=c.execute("SELECT id FROM images WHERE name='blue.png'").fetchone()[0]
         self.assertEqual(self.index.client.retrieve(self.index.collection,[blue]),[])
+
+    def test_two_drive_reads_overlap_and_inference_stays_on_worker(self):
+        raw_by_id={}
+        with app.db() as c:
+            for row in c.execute('SELECT * FROM images').fetchall():
+                raw=Path(row['path']).read_bytes();key='fixture-'+str(row['id']);raw_by_id[key]=raw
+                c.execute('UPDATE images SET drive_id=?,digest=? WHERE id=?',(key,hashlib.md5(raw).hexdigest(),row['id']))
+        active=0;peak=0;lock=threading.Lock();barrier=threading.Barrier(2);owner=threading.get_ident()
+        class Stream(io.BytesIO):
+            def read(inner,*args):
+                nonlocal active,peak
+                with lock:active+=1;peak=max(peak,active)
+                try:barrier.wait(timeout=3);time.sleep(.02);return super().read(*args)
+                finally:
+                    with lock:active-=1
+        def encode(picture):
+            self.assertEqual(threading.get_ident(),owner)
+            with performance.span('embedding'):return vector(0)
+        self.encoder_mock.side_effect=encode;self.index.performance.action({'action':'start','seconds':10})
+        with patch('drive.request',side_effect=lambda data,route,params:Stream(raw_by_id[route.split('/')[-1]])):
+            self.index.index_pending()
+        self.assertEqual(peak,2);self.assertEqual(self.encoder_mock.call_count,2)
+        self.assertEqual(self.index.status()['ready'],3)
+        job=self.index.performance.status()['jobs'][0];stages={s['stage']:s for s in job['stages']}
+        self.assertIn('prefetch_source_read',stages);self.assertIn('prefetch_wait',stages)
+        self.assertIsNone(stages['prefetch_source_read']['share_percent'])
+        self.assertEqual(stages['sqlite_commit']['count'],2)
+        self.assertEqual(stages['vector_upsert']['count'],1)
+
+    def test_partial_batch_write_recovers_confirmed_points(self):
+        original=self.index.client.upsert;calls=[]
+        def partial(collection,points,**kwargs):
+            calls.append(len(points))
+            if len(points)>1:
+                original(collection,points[:1],**kwargs);raise OSError('partial write')
+            return original(collection,points,**kwargs)
+        with patch.object(self.index.client,'upsert',side_effect=partial):self.index.index_pending()
+        self.assertEqual(calls,[3,1,1]);self.assertEqual(self.index.status()['ready'],3)
+        self.assertEqual(self.index.status()['failed'],0)
+
+    def test_batch_failure_isolated_to_one_image(self):
+        with app.db() as c:blue=c.execute("SELECT id FROM images WHERE name='blue.png'").fetchone()[0]
+        original=self.index.client.upsert
+        def fail_blue(collection,points,**kwargs):
+            if any(p.id==blue for p in points):raise OSError('unavailable')
+            return original(collection,points,**kwargs)
+        with patch.object(self.index.client,'upsert',side_effect=fail_blue):self.index.index_pending()
+        status=self.index.status();self.assertEqual((status['ready'],status['failed']),(2,1))
+        with app.db() as c:
+            job=c.execute('SELECT * FROM job_history ORDER BY id DESC LIMIT 1').fetchone()
+            self.assertEqual((job['processed'],job['failed_count']),(3,1))
+
+    def test_revision_changed_during_upsert_never_becomes_ready(self):
+        original=self.index.client.upsert
+        def changed(*args,**kwargs):
+            result=original(*args,**kwargs)
+            with app.db() as c:c.execute("UPDATE images SET digest='changed' WHERE name='blue.png'")
+            return result
+        self.index.performance.action({'action':'start','seconds':10})
+        with patch.object(self.index.client,'upsert',side_effect=changed):self.index.index_pending()
+        self.assertEqual(self.index.status()['ready'],2)
+        self.assertEqual(self.index.performance.status()['jobs'][0]['counts']['stale'],1)
+        self.assertEqual(self.index.search('red')['total'],2)
+
+    def test_group_vectors_recover_after_catalog_commit_failure(self):
+        original=self.index._record_many;calls=0
+        def fail_commit(conn,records):
+            nonlocal calls
+            calls+=1
+            if calls==2:raise OSError('catalog commit interrupted')
+            return original(conn,records)
+        with patch.object(self.index,'_record_many',side_effect=fail_commit),self.assertRaises(OSError):self.index.index_pending()
+        self.index.index_pending()
+        self.assertEqual(self.encoder_mock.call_count,2);self.assertEqual(self.index.status()['ready'],3)
+
+    def test_stop_flushes_completed_group_and_resumes_pending(self):
+        def stop(picture):self.index.stop.set();return vector(0)
+        self.encoder_mock.side_effect=stop;self.index.index_pending()
+        self.assertEqual(self.index.status()['ready'],1)
+        self.index.stop.clear();self.encoder_mock.side_effect=lambda picture:vector(0)
+        self.index.index_pending();self.assertEqual(self.index.status()['ready'],3)
+
+    def test_stop_during_prefetched_body_keeps_results_pending(self):
+        raw_by_id={}
+        with app.db() as c:
+            for row in c.execute('SELECT * FROM images').fetchall():
+                raw=Path(row['path']).read_bytes();key='fixture-'+str(row['id']);raw_by_id[key]=raw
+                c.execute('UPDATE images SET drive_id=?,digest=? WHERE id=?',(key,hashlib.md5(raw).hexdigest(),row['id']))
+        class CancelStream(io.BytesIO):
+            def read(inner,*args):
+                result=super().read(*args);self.index.stop.set();return result
+        with patch('drive.request',side_effect=lambda data,route,params:CancelStream(raw_by_id[route.split('/')[-1]])):
+            self.index.index_pending()
+        self.assertEqual(self.index.status()['ready'],0);self.assertEqual(self.index.status()['failed'],0)
+        self.assertEqual(self.encoder_mock.call_count,0)
+        with app.db() as c:self.assertEqual(c.execute('SELECT status FROM job_history ORDER BY id DESC LIMIT 1').fetchone()[0],'paused')
+        self.index.stop.clear()
+        with patch('drive.request',side_effect=lambda data,route,params:io.BytesIO(raw_by_id[route.split('/')[-1]])):
+            self.index.index_pending()
+        self.assertEqual(self.index.status()['ready'],3)
+
+    def test_pixel_budget_rejects_before_decode_and_preserves_original(self):
+        self.index.max_decode_pixels=100
+        with app.db() as c:row=c.execute('SELECT * FROM images LIMIT 1').fetchone()
+        original=Path(row['path']).read_bytes()
+        with self.assertRaisesRegex(ValueError,'pixel limit'):self.index.load_image(row)
+        self.assertEqual(Path(row['path']).read_bytes(),original)
 
     def test_favorites_filter_and_pagination(self):
         self.index.index_pending()

@@ -4,7 +4,7 @@ $python = '.\.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) {
     & (Join-Path $PSScriptRoot 'setup-runtime.ps1') -Runtime cpu
 }
-& $python -c "import fastembed, onnxruntime, qdrant_client, cv2, PIL"
+& $python -c "import fastembed, onnxruntime, qdrant_client, cv2, PIL, psutil"
 if ($LASTEXITCODE -ne 0) { throw 'Dependencies are missing. Run setup-runtime.ps1 -Runtime cpu (or gpu), then start again.' }
 $model = Join-Path $PSScriptRoot 'data\models\w600k_r50.onnx'
 if (-not (Test-Path -LiteralPath $model)) {

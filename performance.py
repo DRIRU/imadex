@@ -12,6 +12,7 @@ import time
 import uuid
 from collections import deque
 from contextlib import contextmanager
+from concurrent.futures import CancelledError
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,12 +22,15 @@ FILE_COUNT = 5
 STAGES = {'queue_wait', 'catalog', 'cleanup', 'vector_lookup', 'duplicate_lookup', 'duplicate_vector',
           'drive_auth', 'source_open', 'source_read', 'checksum', 'decode', 'model_lock_wait',
           'image_model_load', 'text_model_load', 'embedding', 'text_embedding', 'normalization',
-          'revision_check', 'vector_lock_wait', 'vector_upsert', 'sqlite_commit', 'image_total'}
+          'revision_check', 'vector_lock_wait', 'vector_upsert', 'sqlite_commit', 'image_total',
+          'prefetch_wait','image_prepare','prefetch_source_open','prefetch_source_read','prefetch_drive_auth'}
+PARALLEL_STAGES = {'prefetch_source_open','prefetch_source_read','prefetch_drive_auth'}
 COUNTS = {'visited', 'skipped', 'failed_skipped', 'inferred', 'reused', 'success', 'new_success', 'failed', 'stale'}
 _job = contextvars.ContextVar('performance_job', default=None)
 _stack = contextvars.ContextVar('performance_stack', default=())
 _image = contextvars.ContextVar('performance_image', default=None)
 _image_meta = contextvars.ContextVar('performance_image_meta', default=None)
+_parallel = contextvars.ContextVar('performance_parallel', default=False)
 
 
 def migrate(conn):
@@ -37,6 +41,7 @@ def migrate(conn):
 
 
 def category(error):
+    if isinstance(error,CancelledError):return 'cancelled'
     if isinstance(error, TimeoutError) or isinstance(error, subprocess.TimeoutExpired):return 'timeout'
     if isinstance(error, OSError):return 'io'
     if isinstance(error, ValueError):return 'validation'
@@ -50,7 +55,7 @@ def info(values):
                          'source':{'local','drive'}, 'runtime':{'auto','cpu','cuda','gpu','none'},
                          'kind':{'embeddings','model_prepare','search'}}.items():
         if isinstance(values.get(key),str) and values[key] in allowed:result[key] = values[key]
-    for key in ('image_id','bytes','pixels','width','height','batch_size'):
+    for key in ('image_id','bytes','pixels','width','height','batch_size','prefetch_workers','write_batch_size','prefetch_budget_bytes','max_decode_pixels'):
         value = values.get(key)
         if isinstance(value,int) and not isinstance(value,bool) and value >= 0:result[key] = value
     for key in ('image_providers','text_providers'):
@@ -113,10 +118,12 @@ class Job:
                 'p50_ms':round(samples[math.ceil(n*.5)-1],3) if n else None,
                 'p95_ms':round(samples[math.ceil(n*.95)-1],3) if n else None,
                 'samples':n,'percentiles':'last_512','max_ms':round(stat['max'],3)})
-        exclusive = sum(s['total_ms'] for s in stages if s['stage'] != 'image_total')
+        exclusive = sum(s['total_ms'] for s in stages if s['stage'] != 'image_total' and s['stage'] not in PARALLEL_STAGES)
         stages.sort(key=lambda s:s['total_ms'],reverse=True)
-        for stage in stages:stage['share_percent'] = round(stage['total_ms']/max(elapsed,.001)*100,1) if stage['stage'] != 'image_total' else None
-        measured = [s for s in stages if s['stage'] not in {'image_total','queue_wait'}]
+        for stage in stages:
+            stage['timing_scope'] = 'parallel_worker' if stage['stage'] in PARALLEL_STAGES else 'inclusive_latency' if stage['stage']=='image_total' else 'foreground'
+            stage['share_percent'] = round(stage['total_ms']/max(elapsed,.001)*100,1) if stage['timing_scope']=='foreground' else None
+        measured = [s for s in stages if s['timing_scope']=='foreground' and s['stage']!='queue_wait']
         return {'id':self.id,'job_id':self.job_id,'kind':self.kind,'run_id':self.recorder.run_id,
             'started_utc':self.started_utc,'outcome':self.outcome,'capture_partial':self.partial,
             'wall_ms':round(elapsed,3),'uninstrumented_ms':round(max(0,elapsed-exclusive),3),
@@ -236,7 +243,7 @@ class Recorder:
                 'active':[job.snapshot() for job in self.active.values()], 'jobs':list(reversed(self.recent)),
                 'dropped_events':self.dropped,'write_errors':self.write_errors,'write_error':self.last_write_error,
                 'resource_state':{**self.resource_state,'samples':list(self.resource_state['samples'])},'retention_bytes':MAX_FILE_BYTES*FILE_COUNT,
-                'note':'Embedding wall time includes preprocessing/transfers; GPU samples cover the whole GPU. Percentiles use the last 512 observations per stage.'}
+                'note':'Parallel prefetch totals overlap foreground work and have no wall-time share. Image totals are inclusive pipeline latency. GPU samples cover the whole GPU; percentiles use the last 512 observations.'}
 
     def sample_loop(self):
         cpu_previous = None
@@ -264,7 +271,11 @@ class Recorder:
                 sample['rss_bytes'] = process.memory_info().rss
                 if cpu_previous:sample['cpu_percent'] = round((cpu-cpu_previous[0])/max(now-cpu_previous[1],.001)*100,1)
                 cpu_previous = cpu,now;self.resource_state['process_status'] = 'available'
-            except Exception:self.resource_state['process_status'] = 'unavailable'
+                self.resource_state['process_error'] = None
+            except ImportError:
+                self.resource_state['process_status'] = 'unavailable';self.resource_state['process_error'] = 'dependency_missing'
+            except Exception:
+                self.resource_state['process_status'] = 'unavailable';self.resource_state['process_error'] = 'metrics_unavailable'
             with self.lock:
                 if epoch!=self.epoch or not (self.enabled and self.resources and self.clock()<self.detail_until):continue
                 samples = self.resource_state['samples'];samples.append(sample)
@@ -278,15 +289,16 @@ class Recorder:
 
 
 @contextmanager
-def span(stage, **metadata):
+def span(stage, start_time=None, **metadata):
+    if _parallel.get() and 'prefetch_'+stage in PARALLEL_STAGES:stage='prefetch_'+stage
     job = _job.get()
     if job is None or stage not in STAGES or not job.activate():yield;return
-    recorder = job.recorder;start = recorder.clock();frame = [0.0];parents = _stack.get()
+    recorder = job.recorder;start = recorder.clock() if start_time is None else max(start_time,job.capture_start);frame = [0.0];parents = _stack.get()
     token = _stack.set((*parents,frame));outcome = 'ok';error_category = None
     try:yield
     except BaseException as error:
-        outcome = 'failed';error_category = category(error)
-        if job.last_error is not error:
+        outcome = 'cancelled' if isinstance(error,CancelledError) else 'failed';error_category = category(error)
+        if outcome=='failed' and job.last_error is not error:
             job.last_failure_stage = stage;job.last_error = error
         code = getattr(error,'code',None)
         if isinstance(code,int) and not isinstance(code,bool) and 100<=code<=599:
@@ -313,11 +325,13 @@ def span(stage, **metadata):
 
 
 @contextmanager
-def image(image_id):
+def image(image_id, measure=True):
     token = _image.set(image_id)
     meta_token = _image_meta.set({})
     try:
-        with span('image_total'):yield
+        if measure:
+            with span('image_total'):yield
+        else:yield
     finally:_image.reset(token);_image_meta.reset(meta_token)
 
 
@@ -337,8 +351,17 @@ def metadata(**values):
     job = _job.get()
     if job and job.activate():
         with job.recorder.lock:
-            clean = info(values);job.metadata.update(clean)
+            clean = info(values)
+            if not _parallel.get():job.metadata.update(clean)
             if _image_meta.get() is not None:_image_meta.get().update(clean)
+
+
+def prefetch_call(job, image_id, function, *args):
+    """Give each read worker its own span stack; never inherit mutable parent frames."""
+    job_token=_job.set(job);stack_token=_stack.set(());parallel_token=_parallel.set(True)
+    try:
+        with image(image_id,measure=False):return function(*args)
+    finally:_parallel.reset(parallel_token);_stack.reset(stack_token);_job.reset(job_token)
 
 
 if __name__ == '__main__':

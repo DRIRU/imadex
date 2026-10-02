@@ -906,7 +906,10 @@ no new-image throughput. Models and the first inference are timed separately whe
 The largest stage identifies a candidate bottleneck; wall-time inference includes preprocessing
 and CPU/GPU transfers, and GPU utilization includes other applications.
 
-Stage totals exclude nested child spans; image totals are inclusive. Median/p95 use the most
+Foreground stage totals exclude nested child spans. Parallel prefetch timings overlap foreground
+work and have no wall-time share; `prefetch_wait` measures the time the consumer actually waits.
+Image totals are inclusive pipeline latency and can overlap other images in the same write group.
+Median/p95 use the most
 recent 512 observations per stage, rather than an exact distribution over the entire library.
 Job metadata contains the last observed input's bytes/dimensions/source and the loaded providers.
 Uninstrumented time is shown as a residual. Timing does not prove every ONNX operation ran on CUDA.
@@ -941,3 +944,57 @@ It verifies matching vectors and ready counts across off/summary/detailed modes.
 cache may be used or populated; personal catalog/vector collections and original photos remain
 untouched. Real Drive/CUDA performance must be measured with a representative personal-library
 capture; generated fixtures establish instrumentation behavior, not your Drive bottleneck.
+
+### Overlapping Drive reads and grouped publication
+
+Indexing now reads up to two Drive images ahead while one worker verifies checksums, decodes and
+embeds. It prefetches compressed bytes only; inference remains batch size 1. Identical checksums
+within a group reuse one computed vector. Originals are never mirrored or modified.
+
+Results publish in groups of four: one durable pending catalog transaction, awaited vector
+publication, then one guarded ready/failed catalog transaction. Revisions are checked before
+upsert and again under the final catalog write transaction. A stale vector written during a
+concurrent rescan stays hidden by fingerprint filtering and its catalog record is not marked ready.
+Partial vector writes are recovered by checking confirmed points and retrying remaining points
+individually. A crash after vectors but before the catalog commit resumes without re-encoding
+matching persisted vectors. Stopping flushes completed work; pending reads are cancelled and
+running reads check stop between chunks, subject to existing network timeouts.
+
+**Qdrant local still commits each point internally**, even when the public upsert API receives a
+group. Grouping reduces API calls and catalog commits; it does not eliminate local vector flushes.
+No durability setting, storage location, CUDA runtime, OCR or face-analysis setting is changed.
+Larger write groups can hold the vector lock longer and delay interactive semantic search during
+publication. Reduce `IMAGE_INDEX_WRITE_BATCH` if that tradeoff matters; measure it on the real
+catalog alongside throughput.
+
+Optional environment overrides:
+
+| Variable | Default | Limit / purpose |
+| --- | --- | --- |
+| `IMAGE_INDEX_PREFETCH` | `2` | 0–2 concurrent Drive reads; 0 disables prefetch |
+| `IMAGE_INDEX_WRITE_BATCH` | `4` | 1–16 images per publication group |
+| `IMAGE_INDEX_MAX_PIXELS` | `64000000` | 1–100 million decoded pixels; rejects oversized dimensions before conversion |
+
+At most two prefetched bodies of 64 MiB each are retained, plus the current consumer body and
+transient I/O buffers. Only one image is decoded at a time; decoded image/conversion buffers are
+additional memory. Images above the configured pixel limit fail visibly without changing the
+original. Do not raise the limit without considering available RAM. For the serial comparison,
+use prefetch 0 and write group 1.
+
+Process sampling now distinguishes missing dependencies from unavailable metrics using safe
+categories. `start.ps1` checks psutil alongside existing dependencies. Refresh dependencies with
+`setup-runtime.ps1` using your existing runtime profile (GPU users: `-Runtime gpu`), then restart.
+The diagnostics UI shows read-worker/write-group settings and labels overlapping worker timings.
+
+Temporary fixture benchmark with real inference and simulated Drive/request/write latency:
+
+```powershell
+.\.venv\Scripts\python.exe verify_pipeline.py --real-models --provider cpu --repeats 5
+```
+
+Use `--provider cuda` to exercise the installed GPU runtime. This uses temporary catalog/vector
+storage and generated images, verifies matching vectors across serial and optimized modes, and
+leaves the personal catalog untouched. `--request-delay` and `--upsert-delay` simulate seconds of
+latency; without `--real-models`, inference is synthetic. Simulated speedups are not predictions
+for real Drive indexing. Capture representative new/changed Drive images after restarting to
+measure the actual effect; avoid forcing a reindex of the personal library for a benchmark.
