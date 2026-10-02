@@ -307,11 +307,15 @@ class Handler(BaseHTTPRequestHandler):
                     'sync':synchronizer.status() if synchronizer else None,
                     'thumbnail_cache':thumbnail_cache.status() if thumbnail_cache else None,
                     'ocr':ocr_service.status() if ocr_service else None,
+                    'performance':semantic_index.performance.status() if semantic_index else None,
                     'access':{'tunnel_configured':bool(getattr(self.server,'public_origin',None)),
                               'authenticated':bool(getattr(self.server,'access_password',None))},
                     'requested_provider':accel.mode()})
             if url.path == '/api/sync':
                 return self.respond(synchronizer.status() if synchronizer else {'enabled':False,'running':False,'jobs':[]})
+            if url.path in ('/api/performance','/api/performance/export'):
+                if semantic_index is None:return self.respond({'error':'Embedding service unavailable'},503)
+                return self.respond(semantic_index.performance.status())
             if url.path == '/api/drive':
                 return self.respond({**drive.state(DATA), 'can_connect': self.on_pc()})
             if url.path == '/api/people':
@@ -431,7 +435,7 @@ class Handler(BaseHTTPRequestHandler):
                                 pass
                         return
                     return self.send_file(DATA / 'thumbnails' / (row['digest'] + '.jpg') if thumb else Path(row['path']), 'image/jpeg' if thumb else None)
-            static = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/mobile.css': 'mobile.css', '/semantic.css': 'semantic.css', '/favicon.svg': 'favicon.svg', '/people.js': 'people.js', '/people.css': 'people.css', '/setup.js': 'setup.js', '/setup.css': 'setup.css', '/discovery.js': 'discovery.js', '/discovery.css': 'discovery.css', '/duplicates.js': 'duplicates.js', '/pwa.js': 'pwa.js', '/sw.js': 'sw.js', '/manifest.webmanifest': 'manifest.webmanifest', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png'}
+            static = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/mobile.css': 'mobile.css', '/semantic.css': 'semantic.css', '/favicon.svg': 'favicon.svg', '/people.js': 'people.js', '/people.css': 'people.css', '/setup.js': 'setup.js', '/performance.js': 'performance.js', '/performance.css': 'performance.css', '/setup.css': 'setup.css', '/discovery.js': 'discovery.js', '/discovery.css': 'discovery.css', '/duplicates.js': 'duplicates.js', '/pwa.js': 'pwa.js', '/sw.js': 'sw.js', '/manifest.webmanifest': 'manifest.webmanifest', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png'}
             if url.path in static:
                 return self.send_file(BASE / 'web' / static[url.path])
             self.respond({'error': 'Not found'}, 404)
@@ -452,6 +456,9 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError('JSON object required')
             if self.path == '/api/gallery':
                 return self.respond(gallery.Gallery(db).mutate(payload))
+            if self.path == '/api/performance':
+                if semantic_index is None:raise ValueError('Embedding service unavailable')
+                return self.respond(semantic_index.performance.action(payload))
             if self.path == '/api/ocr':
                 if ocr_service is None:raise ValueError('OCR service unavailable')
                 return self.respond(ocr_service.action(payload))
@@ -567,6 +574,17 @@ if __name__ == '__main__':
     face_detector = Detector(DATA, db, semantic_index.load_image)
     face_detector.start()
     recognizer = recognition.Recognizer(DATA, db, semantic_index.load_image)
+    def performance_activity():
+        with db() as conn:
+            def enabled(table):
+                row = conn.execute('SELECT enabled FROM '+table+' WHERE id=1').fetchone()
+                return bool(row and row[0])
+            return {'ocr_enabled':enabled('ocr_settings'),'recognition_enabled':enabled('recognition_settings'),
+                    'detection_enabled':enabled('detection_settings'),'scan_running':bool(scan_status['running']),
+                    'ocr_running':bool(ocr_service.running),'recognition_running':bool(recognizer.running),
+                    'detection_running':bool(face_detector.running)}
+    semantic_index.activity = performance_activity
+    semantic_index.performance.activity = performance_activity
     recognizer.start()
     print(f'Image library: http://127.0.0.1:{args.port}', flush=True)
     try:

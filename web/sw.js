@@ -1,6 +1,6 @@
 // Cache only the empty UI shell. APIs, originals and previews always use the network.
-const SHELL='imadex-shell-v3';
-const assets=['/','/app.js','/people.js','/setup.js','/discovery.js','/duplicates.js','/pwa.js','/style.css','/mobile.css','/semantic.css','/people.css','/setup.css','/discovery.css','/favicon.svg','/manifest.webmanifest','/icon-192.png','/icon-512.png'];
+const SHELL='imadex-shell-v4';
+const assets=['/','/app.js','/people.js','/setup.js','/performance.js','/performance.css','/discovery.js','/duplicates.js','/pwa.js','/style.css','/mobile.css','/semantic.css','/people.css','/setup.css','/discovery.css','/favicon.svg','/manifest.webmanifest','/icon-192.png','/icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil((async()=>{
  const cache=await caches.open(SHELL);
  // Install can occur behind Basic authentication; never cache a failed sign-in page.

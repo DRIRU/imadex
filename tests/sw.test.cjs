@@ -22,7 +22,7 @@ function worker(){
 test('offline fallback serves the shell but never API or private photos',async()=>{
  const w=worker();await w.dispatch('install');w.setNetwork(async()=>{throw Error('Offline')});
  const shell=await w.dispatch('fetch',{request:w.request('/')});assert.equal(await shell.text(),'public UI shell');
- for(const pathname of ['/api/images','/api/gallery','/thumb/1','/image/1'])await assert.rejects(w.dispatch('fetch',{request:w.request(pathname)}),/Offline/);
+ for(const pathname of ['/api/images','/api/gallery','/api/performance','/api/performance/export','/thumb/1','/image/1'])await assert.rejects(w.dispatch('fetch',{request:w.request(pathname)}),/Offline/);
  for(const entries of w.stores.values())assert.equal([...entries.keys()].some(key=>key.startsWith('/api/')||key.startsWith('/thumb/')||key.startsWith('/image/')),false);
 });
 

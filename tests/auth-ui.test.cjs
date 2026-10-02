@@ -12,6 +12,7 @@ function page(fetch){
   window:{addEventListener:(name,fn)=>events[name]=fn},navigator:{onLine:true},document:{querySelectorAll:()=>[]},caches:{keys:async()=>[]}});
  const app=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
  vm.runInContext(app.slice(app.indexOf('async function api('),app.indexOf('const safely')),context);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/performance.js'),'utf8'),context);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/pwa.js'),'utf8'),context);
  return {context,state,nodes,events,call:path=>vm.runInContext(`api(${JSON.stringify(path)})`,context)};
 }
@@ -27,6 +28,9 @@ test('401 clears private gallery and blocks earlier successful responses',async(
  assert.equal(p.state.authLocked,true);assert.equal(p.state.items.length,0);assert.equal(p.state.library,null);
  assert.equal(p.nodes.get('folders').textContent,'');assert.equal(p.nodes.get('tags').value,'');
  assert.equal(p.nodes.get('photoOCRText').textContent,'');assert.equal(p.nodes.get('photoOCRStatus').textContent,'');
+ assert.equal(p.nodes.get('performanceStages').textContent,'');assert.equal(p.nodes.get('performanceJob').textContent,'');
+ assert.equal(p.nodes.get('performanceStatus').textContent,'');
+ assert.equal(vm.runInContext('performanceState',p.context),null);
 });
 
 test('online event preserves sign-in notice and blocked requests never fetch',async()=>{

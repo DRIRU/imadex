@@ -2,6 +2,8 @@ import hashlib
 import io
 import sys
 import tempfile
+import time
+import performance
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -51,13 +53,19 @@ class SemanticTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_real_vector_store_ranking_duplicates_and_resume(self):
+        self.index.performance.action({'action':'start','seconds':10})
         self.index.index_pending()
+        diagnostic = self.index.performance.status()['jobs'][0]
+        self.assertEqual(diagnostic['counts']['new_success'],2)
+        self.assertEqual(diagnostic['counts']['reused'],1)
+        self.assertEqual(diagnostic['counts']['visited'],3)
         self.assertEqual(self.index.status()['ready'], 3)
         self.assertEqual(self.encoder_mock.call_count, 2)
         result = self.index.search('red')
         self.assertTrue(result['items'][0]['name'].startswith('red'))
         self.assertEqual(result['items'][-1]['name'], 'blue.png')
         self.index.index_pending()
+        self.assertEqual(self.index.performance.status()['jobs'][0]['counts']['skipped'],3)
         self.assertEqual(self.encoder_mock.call_count, 2)
         self.index.close()
         reopened = SemanticIndex(app.DATA, app.db)
@@ -78,6 +86,36 @@ class SemanticTests(unittest.TestCase):
         self.index.index_pending()
         self.assertEqual(self.index.status()['ready'], 2)
         self.assertEqual(self.index.client.count(COLLECTION).count, 2)
+
+    def test_delayed_inference_and_storage_are_attributed_separately(self):
+        self.index.performance.action({'action':'start','seconds':10})
+        def encode(picture):
+            with performance.span('embedding'):
+                time.sleep(.04);return vector(0)
+        original=self.index.client.upsert
+        def persist(*args,**kwargs):
+            time.sleep(.03);return original(*args,**kwargs)
+        self.encoder_mock.side_effect=encode
+        with patch.object(self.index.client,'upsert',side_effect=persist):self.index.index_pending()
+        job=self.index.performance.status()['jobs'][0];stages={s['stage']:s for s in job['stages']}
+        self.assertGreaterEqual(stages['embedding']['total_ms'],80)
+        self.assertGreaterEqual(stages['vector_upsert']['total_ms'],90)
+        self.assertEqual(stages['embedding']['count'],2)
+        self.assertEqual(stages['vector_upsert']['count'],3)
+        self.assertLess(sum(s['total_ms'] for s in stages.values() if s['stage']!='image_total'),job['wall_ms']+1)
+        self.assertEqual(self.index.status()['ready'],3)
+
+    def test_diagnostics_count_concurrent_revision_discard(self):
+        self.index.performance.action({'action':'start','seconds':10})
+        def changed(picture):
+            with app.db() as c:c.execute("UPDATE images SET digest='changed' WHERE name='blue.png'")
+            return vector(0)
+        self.encoder_mock.side_effect=changed;self.index.index_pending()
+        job=self.index.performance.status()['jobs'][0]
+        self.assertEqual(job['counts']['stale'],1)
+        self.assertEqual(job['counts']['success'],2)
+        with app.db() as c:blue=c.execute("SELECT id FROM images WHERE name='blue.png'").fetchone()[0]
+        self.assertEqual(self.index.client.retrieve(self.index.collection,[blue]),[])
 
     def test_favorites_filter_and_pagination(self):
         self.index.index_pending()
@@ -154,6 +192,15 @@ class SemanticTests(unittest.TestCase):
     def test_drive_pixels_read_without_persisting_original(self):
         raw = (self.photos / 'red.png').read_bytes()
         row = {'size':len(raw),'drive_id':'drive-image','digest':hashlib.md5(raw).hexdigest()}
+        self.index.performance.action({'action':'start','seconds':10})
+        class SlowRead(io.BytesIO):
+            def read(inner,*args):time.sleep(.025);return super().read(*args)
+        with patch('drive.access_token',return_value='SECRET-TOKEN'),patch('drive.urlopen',return_value=SlowRead(raw)):
+            with self.index.performance.job('embeddings'),self.index.load_image(row):pass
+        diagnostic=self.index.performance.status()['jobs'][0]
+        stages={s['stage']:s for s in diagnostic['stages']}
+        self.assertGreaterEqual(stages['source_read']['total_ms'],25)
+        self.assertIn('drive_auth',stages);self.assertEqual(diagnostic['metadata']['source'],'drive')
         with patch('drive.request', return_value=io.BytesIO(raw)) as request:
             with self.index.load_image(row) as picture:
                 self.assertEqual(picture.getpixel((0, 0)), (255, 0, 0))

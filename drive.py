@@ -93,11 +93,14 @@ def access_token(data):
 
 
 def request(data, route, params=None):
+    from performance import span
     url = 'https://www.googleapis.com/drive/v3/' + route
     if params:
         url += '?' + urlencode(params)
     try:
-        return urlopen(Request(url, headers={'Authorization': 'Bearer ' + access_token(data)}), timeout=60)
+        with span('drive_auth'):
+            token = access_token(data)
+        return urlopen(Request(url, headers={'Authorization': 'Bearer ' + token}), timeout=60)
     except HTTPError as error:
         raise DriveError(error.code) from None
 

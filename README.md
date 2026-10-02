@@ -883,3 +883,61 @@ Actual Docker and Cloudflare phone acceptance remain pending.
 
 Real extraction/search smoke test using only temporary generated fixtures:
 ` .\.venv\Scripts\python.exe -X utf8 verify_ocr.py `.
+
+## Performance diagnostics
+
+Restart Imadex after updating, then open **Setup & background jobs → Performance diagnostics**.
+Diagnostics are off by default. **Keep job summaries** records each embedding job; **Start capture**
+also records individual spans for 1–30 minutes. Stopping or expiration ends detailed capture while
+summaries continue. Uncheck summaries to stop logging entirely. Starting during a job produces a
+partial capture; queue waiting is reported separately from active job time.
+
+Enable resource sampling to collect GPU utilization/VRAM and process CPU/RAM every two seconds
+during detailed capture. `nvidia-smi` requests time out after one second; missing metrics display
+as unavailable. [psutil](https://pypi.org/project/psutil/) is included in both runtime profiles for
+process metrics. Refresh dependencies with your existing CPU/CUDA runtime setup if needed; keep
+the GPU profile when using CUDA. Process CPU can exceed 100% when several cores are active.
+
+Start a capture before indexing new or changed images, then select the embedding job to inspect
+Drive authentication/request/body reads, hashing, decoding, model loading, lock waits, embedding,
+Qdrant upserts and SQLite commits. Counts separate inferred images, successful new images,
+duplicate reuse, unchanged checks, failures and stale revisions. Rechecking ready images yields
+no new-image throughput. Models and the first inference are timed separately when observed.
+The largest stage identifies a candidate bottleneck; wall-time inference includes preprocessing
+and CPU/GPU transfers, and GPU utilization includes other applications.
+
+Stage totals exclude nested child spans; image totals are inclusive. Median/p95 use the most
+recent 512 observations per stage, rather than an exact distribution over the entire library.
+Job metadata contains the last observed input's bytes/dimensions/source and the loaded providers.
+Uninstrumented time is shown as a residual. Timing does not prove every ONNX operation ran on CUDA.
+
+**Export diagnostics** downloads the current bounded summary and resource samples as JSON through
+the authenticated API. **Clear diagnostics** requires confirmation, disables logging and deletes
+the retained diagnostic files. Exported numeric IDs identify records within this catalog; review
+reports before sharing. Logs contain no filenames, paths, Drive IDs/URLs, checksums, query/OCR/face
+content, tokens, credentials or raw exception messages. No diagnostic data is sent externally.
+
+Detailed JSONL spans and job summaries live in ignored `data/performance/`, capped at five 10 MiB
+files, and are excluded from normal backup archives. A bounded background writer drops events
+when overloaded and reports dropped events/write errors without stopping indexing. The dashboard
+keeps at most 20 recent summaries in memory and reads retained history once at startup. Diagnostic
+APIs are never cached by the installed app; sign-in failure clears visible diagnostic data.
+
+Read recent retained job summaries from the PC:
+
+```powershell
+.\.venv\Scripts\python.exe performance.py --data data
+```
+
+Compare logging overhead using generated fixtures in a temporary catalog and vector store:
+
+```powershell
+.\.venv\Scripts\python.exe verify_performance.py --real-models --provider cuda --model siglip2 --repeats 3
+```
+
+Use `--provider cpu` for CPU verification. Without `--real-models`, the command uses a synthetic
+20 ms encoder. Models are warmed before comparison; mode order rotates across repetitions.
+It verifies matching vectors and ready counts across off/summary/detailed modes. Existing model
+cache may be used or populated; personal catalog/vector collections and original photos remain
+untouched. Real Drive/CUDA performance must be measured with a representative personal-library
+capture; generated fixtures establish instrumentation behavior, not your Drive bottleneck.

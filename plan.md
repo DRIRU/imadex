@@ -439,3 +439,148 @@ User requested committing the current changes. Included reliability/runtime setu
 ## GitHub publication — 2026-10-03
 
 User authorized pushing the committed changes to GitHub. Implementation commit: `80ce82b`. Target: existing `origin` remote, `https://github.com/DRIRU/imadex.git`, branch `main`. Working tree was clean before recording this checkpoint. Publish using a normal push; existing deployment/pilot acceptance gates remain open.
+
+## Performance logging plan — 2026-10-03
+
+Status: implementation complete (2026-10-03); verification passed. Real personal-library Drive/CUDA baseline remains an operator acceptance step. iCloud is deferred. The user confirmed both loaded SigLIP 2 sessions report CUDA first and requested diagnostics for slow indexing. Treat the main bottleneck as unknown until timings are captured. Do not infer that CUDA is inactive from an earlier probe of another environment, or assume batching will help before measuring.
+
+### Outcome and initial scope
+
+Show where embedding-job wall time goes, how many new images finish per minute, and whether the worker is spending time reading Drive, preparing pixels, running inference, waiting for locks, or committing vectors/metadata. Start with the existing single embedding worker and batch size 1. Logging must preserve indexing, retry, duplicate reuse, authentication and original-file handling. Performance optimizations are a subsequent change based on the measured result.
+
+Current evidence from code: `SemanticIndex.index_pending` handles rows sequentially; `load_image` reads original bytes synchronously and verifies checksums; `encode_image` holds the shared image/text model lock; each point is retrieved/upserted separately, with upsert completion awaited. OCR, face analysis and HTTP browsing can run alongside embeddings. These are candidates for measurement, not a proven ranking of bottlenecks.
+
+### Phase 1 — Bounded timing recorder
+
+- [x] Add `performance.py` with monotonic high-resolution timers and a job/span context that follows calls from the embedding worker into image loading/model/storage helpers. Use existing job-history IDs plus a process/run ID to correlate events across restart; include a schema version and UTC timestamp.
+- [x] Record elapsed milliseconds, stage, outcome, numeric local image ID, source kind (Google Drive/local; iCloud labels deferred), input bytes/pixels, encoder, actual loaded image/text providers, vector backend, batch size and concurrent background-worker flags. Record processed/success/failed/skipped/reused/stale-discard counts separately; do not mix an unchanged catalog check with new-image throughput.
+- [x] Separate model loading and the first inference from subsequent calls. Record first-call latency explicitly; do not claim that one call guarantees the model is fully warmed up.
+- [x] Provide lightweight per-job summaries when enabled and an explicit detailed capture capped at 30 minutes. Default diagnostics off. Keep bounded aggregate state for current/recent jobs and a bounded distribution for p50/p95; identify sampled/approximate percentiles and their sample counts.
+- [x] Write diagnostic JSONL files under ignored `data/performance/`, rotating at 10 MiB with five files total. Use a bounded writer queue, flush outside indexing locks, and expose dropped-event/log-write-error counts. A full queue, unavailable directory or disk error must not stop indexing or cause an unbounded retry loop.
+- [x] Store no filenames, paths, Drive IDs/URLs, checksums, search text, OCR text, face data, tokens, passwords or raw exception messages. Use allowlisted error categories and numeric HTTP status codes. Keep diagnostics out of ordinary backup archives; document that exported numeric IDs still identify records within this catalog.
+
+### Phase 2 — Instrument the full embedding path
+
+| Timing stage | Measurement boundary / diagnostic purpose |
+| --- | --- |
+| Job scheduling and catalog enumeration | Queue signal to worker start where measurable, then row enumeration and missing-vector cleanup. Coalesced wake signals do not imply an individual image enqueue timestamp. |
+| Vector lookup and duplicate reuse | Qdrant point existence/retrieval, duplicate SQL lookup and reused-vector retrieval, including unchanged-row checks. |
+| Source read | Drive token/access preparation, request/header wait, body read, or local disk read. Measure the full body transfer; timing only `urlopen` would miss it. |
+| Checksum verification | Hash validation of downloaded/read bytes. |
+| Image preparation | Decode, EXIF transpose and RGB/alpha conversion; record original dimensions and encoded byte size. |
+| Model wait and setup | Time waiting to acquire the model lock, then image/text model loading separately. Avoid duplicate measurements from nested reentrant acquisitions. |
+| Embedding call | Consume the embedding generator through the returned vector; include FastEmbed preprocessing, CPU/GPU transfers and inference. Report it as end-to-end embedding wall time, not CUDA kernel time. |
+| Vector normalization | Validate dimensions/finiteness and normalize the result. |
+| Publish checks and persistence | Catalog revision recheck, vector-lock wait, Qdrant upsert completion and SQLite record commit. |
+| Per-image/job total | Total wall time, failure stage, residual/uninstrumented time and job duration; preserve data for failed/interrupted work. |
+
+- [x] Use exclusive stage durations for the wall-time breakdown; display parent spans separately so nested model setup/embedding time is not counted twice. If parallel stages are added later, summed worker durations must not be presented as job wall time.
+- [x] Identify the purpose of shared-loader calls (embeddings, OCR, detection, recognition) through timing context so a face/OCR read does not inflate embedding totals. Observe concurrent services without altering recognition/matching behavior.
+- [x] Measure lock waiting separately from the operation inside each lock. Capture interactive text-model lock contention without recording the query.
+- [x] Optional resource sampling every 2 seconds during a capture: bounded-timeout `nvidia-smi` for GPU utilization/VRAM, plus process CPU/RSS if supported. Report absent/unsupported metrics clearly. GPU-wide utilization can include other applications and is supporting evidence, not proof of this worker's kernel time; narrow inference spans require a later dedicated profiler if needed.
+
+### Phase 3 — Dashboard and local report
+
+- [x] Add authenticated `/api/performance` read/action endpoints using existing Host/Origin/auth checks. Support start/stop detailed capture, diagnostics enable/disable, bounded report export and confirmed clear. Store settings locally; expose no arbitrary file paths or shell commands.
+- [x] Extend Setup & background jobs with a phone-friendly Performance section: current capture, new images/minute, stage totals/share, median/p95 and samples, first-call/model-loading cost, failures/reuse/skips, active providers and GPU metrics when available.
+- [x] Highlight the stage with the largest measured exclusive wall-time share, label the capture size, and distinguish a capture dominated by unchanged checks or model loading from steady new-image indexing. Avoid a fixed speed expectation or an automatic diagnosis from one image.
+- [x] Add a CLI report for recent diagnostic jobs, reading bounded retained data. Keep dashboard summary reads cheap; do not scan all logs at each polling request. Authentication failure clears visible diagnostics; service-worker caches must exclude reports/API data.
+
+### Phase 4 — Verify and establish a baseline
+
+- [x] Test timers with a controlled monotonic clock and injected stage delays. Verify slow read, slow inference, slow upsert and model-lock contention appear in the right bucket; assert nested totals do not double count.
+- [x] Test unchanged/duplicate reuse, decode/download failures, stale-content discard, restart/interruption, bounded queues/rotation, writer failure and automatic capture expiry. Check redaction against fixture filenames, paths, credentials and content.
+- [x] Verify API authentication/action limits and mobile layout; run existing embedding/catalog/runtime/privacy regression checks. Compare vectors/ranking and resume behavior with diagnostics on/off.
+- [x] Benchmark logging overhead on the same generated fixture workload with diagnostics off, summary-only and detailed capture, with repeated warmed runs. Target under 5% added job time; report variability and absolute cost instead of assuming the threshold passed.
+- [x] Add a separate diagnostic benchmark command that uses temporary catalog/vector storage and shared model cache, explicitly selects the runtime/model, and never forces reindexing or changes ready/failure state in the personal catalog. Preserve originals and avoid storing Drive bytes on disk.
+- [ ] Capture a representative 30–50 new/changed Drive-image sample during normal indexing; retain model loading separately and group results by input size/dimensions. Compare with temporary local fixtures to isolate network effects. Record concurrent OCR/face-analysis activity and optionally compare a second run with those services paused by the user.
+- [ ] Save a personal-library baseline summary in this plan: images/minute, sample count, per-stage p50/p95/totals, model/providers, input mix, GPU memory/utilization and measured logging overhead. Accuracy and timing on generated fixtures do not establish personal-library performance.
+
+### Follow-up decisions based on evidence
+
+- Drive-read dominated: evaluate bounded download/decode prefetch with memory limits and Drive retry/backoff.
+- Embedding-call dominated: benchmark small batches (start at 2, then 4 on the 4 GB GTX 1650), measure peak VRAM and interactive-search latency; do not assume batches 4–8 fit or improve throughput.
+- Vector/SQLite persistence dominated: evaluate grouped lookups/upserts/commits while preserving per-image revision guards and crash recovery.
+- Lock contention dominated: evaluate scheduling/search priority and worker coordination before adding more concurrent GPU sessions.
+- Model setup dominated: use existing model preparation and report first-use cost separately; avoid treating it as steady-state throughput.
+
+Acceptance: a bounded capture attributes slow indexing to measured stages, distinguishes CUDA session availability from actual end-to-end bottlenecks, survives disabled/unavailable logging, and provides actionable PC/phone diagnostics without changing indexing results or storing image content in logs. Implement phases 1–2 first, then reporting and baseline validation; choose a performance optimization only after reviewing the baseline.
+
+### Implementation and verification checkpoint — 2026-10-03
+
+- Added `performance.py`: default-off persistent settings, monotonic/exclusive spans, run/job/image correlation, up to 20 active/recent summaries, last-512 percentiles, 512-event nonblocking writer, five rotating 10 MiB logs, partial captures, expiry, epoch-safe clear, privacy allowlists and bounded CLI report.
+- Instrumented Drive authentication/request/body reads, local reads, checksum/decode, model startup/first inference, model/vector lock waits, duplicate lookup/reuse, revision checks, upsert completion, SQLite commits, cleanup/catalog and image totals. Coalesced queue waiting is separate from active wall time. Search/model-preparation have distinct contexts; OCR/face-loader calls cannot inflate embedding totals.
+- Added authenticated summary/action/export APIs and phone Setup controls. Resources sample GPU utilization/VRAM and process CPU/RSS every two seconds during capture; `nvidia-smi` has a one-second timeout. Worker enabled/running flags observed at job start and in resource samples. Pinned psutil 7.2.2 added to shared runtime requirements ([package source](https://pypi.org/project/psutil/)).
+- Polls use in-memory summaries; no retained-log rescan. New installed-app shell includes diagnostics assets; API remains network-only. Auth loss clears diagnostics/UI state. Export contains bounded summaries/current resource samples; detailed spans remain in local JSONL. Summary input metadata describes the last observed input; detailed image-total events include individual bytes/dimensions/source for grouping.
+- Verification: 91 Python tests passed with SigLIP2 and with CLIP. Controlled nested/exclusive timers and lock waits; slow Drive body/inference/upsert; reuse/unchanged rows; concurrent-revision discard; safe errors; API auth/limits; expiry/partial captures; bounded queue/samples/rotation; disk failure; clear during work; restart; resource timeout; backup exclusion. Five Node auth/service-worker privacy checks passed. Phone UI at 390×844: dialog 366 px, page 390 px, table scrolls internally (309 px viewport / 522 px content). Live GPU/VRAM/process CPU/RAM observed. Generated fixtures only; personal catalog untouched.
+- Real warmed SigLIP2 / CPUExecutionProvider benchmark: six distinct 640×480 PNG fixtures/run, five repeated runs/mode, rotating mode order, temporary catalog/local Qdrant. Median off 1127.336 ms (range 1084.648–1166.626), summary 1120.094 (1085.027–1130.648), detailed 1113.973 (1079.317–1126.421). Differences −0.64% / −1.19% are normal variability, not evidence logging speeds inference; no measured overhead above the 5% target. Matching vectors/six ready images verified each run. Resource sampling off for overhead comparison.
+- Example fixture job: 327.67 new images/min; six images; 1098.668 ms wall. Inference 781.598 ms / median 130.417 / p95 134.199 (71.1%); SQLite 158.329 / median 12.830 / p95 14.252 (14.4%); upsert 58.047 / median 9.485 / p95 10.452 (5.3%); body reads 45.473 / median 7.508 / p95 8.353 (4.1%). Generated local CPU workload; does not identify the user's Drive/CUDA bottleneck. Model loading/first-call costs excluded by warming.
+- Remaining operator step: restart with the existing GPU runtime, start a 10-minute capture with resources, and index representative new/changed Drive photos. Export before choosing batching/prefetch/storage changes. No personal-library speed diagnosis inferred from fixtures. Direct iCloud remains deferred.
+- Publication: user requested commit and push after completion. Publish implementation/docs to existing `origin/main` using normal push; exclude ignored logs, caches, QA fixtures, credentials and catalog.
+
+## Direct iCloud access plan — 2026-10-03
+
+Status: deferred at the user’s request on 2026-10-03; no iCloud implementation in this phase. User clarified that iCloud must be accessed directly from Imadex, as Google Drive is, without requiring iCloud for Windows or a local synced photo folder. This section replaces the earlier folder-based proposal. Planning only; implementation has not started.
+
+### Required behavior and feasibility
+
+Connect an Apple account on the PC, browse/select remote photo libraries or albums, index their metadata, fetch photo bytes into bounded memory for local embeddings/OCR and serve authenticated previews/full images to the phone. Originals stay in iCloud. Persist only catalog metadata, vectors, bounded previews and protected connection/session state; no full-library mirror or originals directory.
+
+Unlike the existing Google Drive OAuth adapter, the evaluated clients use iCloud web-service authentication and session cookies rather than an equivalent Drive-style scoped OAuth grant. Treat this as an unofficial integration requiring a tested and pinned dependency. Apple's public PhotoKit/CloudKit documentation does not establish a generic Windows REST connector for an existing iCloud Photos account; do not substitute an app's CloudKit container for the user's photo library.
+
+Primary sources reviewed:
+- [pyicloud repository and authentication/photo examples](https://github.com/picklepete/pyicloud).
+- [icloudpd authentication documentation](https://github.com/icloud-photos-downloader/icloud_photos_downloader/blob/master/docs/authentication.md).
+- [Apple PhotoKit](https://developer.apple.com/documentation/photokit) and [Apple CloudKit](https://developer.apple.com/documentation/cloudkit).
+
+The checked icloudpd documentation reports unsupported Advanced Data Protection and hardware-key authentication. Compatibility is therefore a release gate, not an assumption that any Apple account will work. Do not disable protection, remove security keys or change account settings automatically. If the selected client cannot authenticate/read this account under its current protections, report the specific unsupported state and revisit the connector. Session lifetime is controlled by Apple; do not promise permanent login.
+
+### Phase 1 — Prove direct read access before integrating
+
+- [ ] Evaluate current pyicloud/icloudpd client implementations, ownership, release activity, license, supported Python versions, dependency conflicts and read-stream APIs. Pin an exact tested release/commit and isolate dependencies if needed; do not install an arbitrary package merely because it has a familiar name.
+- [ ] Determine compatibility with the user's current Apple account region, two-factor authentication, web-data access settings, Advanced Data Protection and hardware keys. Separate password login, two-factor challenge, device approval and unsupported authentication states.
+- [ ] Build a minimal local-only connection probe with user-entered credentials, limited metadata enumeration and one selected photo read. No credentials in command arguments, environment files, diagnostic logs, shell history or chat; no account configuration changes.
+- [ ] Verify that metadata listing does not bulk-download originals and that downloads can be consumed as a bounded stream without the library silently saving originals or buffering unlimited content.
+- [ ] Confirm remote library/album IDs, asset IDs, resource versions, available original/edited/preview renditions, HEIC formats, pagination and error behavior using a small user-selected pilot. Photos albums differ from Google Drive folders; expose only collections the tested client actually supplies.
+- [ ] Gate wider integration on successful direct authentication, metadata listing and bounded in-memory read. Document unavailable features rather than promising parity with every Apple Photos feature.
+
+### Phase 2 — Authentication and source adapter
+
+- [ ] Add an iCloud adapter exposing connection status, list libraries/albums, paginate assets, refresh asset metadata, fetch preview and fetch selected rendition. Application operations are read-only: no delete/upload/edit/device-management calls. Unofficial session access may be broader than the adapter; do not describe it as a server-enforced read-only OAuth scope.
+- [ ] Restrict account setup and reauthentication endpoints to the PC using existing loopback/Origin/auth checks. Prefer a local interactive helper; if a setup UI is used, keep password/code entry local, ephemeral and excluded from request logging. The tunnel dashboard browses an already connected account.
+- [ ] Store sensitive session material separately under ignored data with owner-only access and platform-protected encryption where supported. Prefer session reuse; default to no persisted password. Offer OS credential-manager storage only as an explicit setting if needed for tested reconnect behavior. Exclude all session/credential material from backup and diagnostic export.
+- [ ] Persist a non-secret connection reference and expose connected/challenge-required/session-expired/access-denied/rate-limited/unavailable states. Reauthentication pauses affected jobs and preserves the catalog; never loop repeated password submissions after a challenge or rejection.
+- [ ] Disconnect clears only Imadex's locally stored connection secrets and stops its iCloud work; distinguish that from Apple-side session revocation. Never sign the user out of other Apple devices.
+- [ ] Introduce source/account/library/asset identity fields through an idempotent catalog migration preserving Google Drive/local IDs, labels and vector collections. First release supports one iCloud account; schema keys include connection/library identity to permit later expansion.
+- [ ] Validate Apple-returned download URLs/redirects against the selected client's verified endpoint rules. Refresh expired signed URLs, avoid storing them as permanent asset identity, and do not forward auth headers to arbitrary redirect destinations.
+
+### Phase 3 — Remote catalog, media and synchronization
+
+- [ ] Select remote libraries/albums or All Photos through authenticated APIs. Track asset membership independently of Imadex's user-created albums; deduplicate a photo selected through multiple remote albums.
+- [ ] Derive revision identity from verified provider resource versions/checksums where available. If no stable version is supplied, define conservative revalidation before reuse. Asset ID or filename alone is not a content checksum; do not reuse old vectors after an edit.
+- [ ] Reuse the existing bounded 64 MB image-input limit, checksum verification where the provider supplies one, EXIF orientation and RGB conversion. Stream originals/selected analysis renditions into memory; enforce the cap during reads, including when Content-Length is absent.
+- [ ] Make analysis rendition selection explicit (original/edited, provider availability and fallback). Store rendition/version in fingerprints so a changed analysis source cannot reuse a vector silently. Preserve original-file viewing as a separately identified resource.
+- [ ] Add HEIC/HEIF decoding after verifying decoder distribution/license/runtime compatibility. Validate orientation/color on a licensed fixture; report unsupported formats clearly. Index the still component of Live Photos initially; video playback, RAW processing, Apple People labels and full Apple album parity remain outside the first release.
+- [ ] Integrate embeddings, optional OCR, local People labels and image viewing through the adapter without changing face recognition/matching logic. Keep existing stale-result guards and do not transfer manual labels to ambiguous replacement assets.
+- [ ] Fetch provider previews where suitable and otherwise derive bounded JPEG previews from the selected remote resource in memory. Apply existing private cache budgets/revision invalidation; authenticated image responses and service-worker privacy rules remain in force.
+- [ ] Add configurable polling, pause/resume, bounded retry/backoff and resumable scan checkpoints. Verify whether the selected client offers reliable change tokens; use paginated reconciliation if it does not. Do not assume a Google Drive-style changes API exists.
+- [ ] Commit membership/removal only after complete successful enumeration of the selected scope. Authentication failure, throttling, partial pages, disappearing signed URLs and ambiguous library access preserve the previous catalog. A removed album membership does not mean the asset was deleted from All Photos.
+- [ ] Distinguish reconnect-needed, temporarily unavailable, changed and confirmed absent assets. Preserve metadata while access is interrupted and revalidate before publishing recovered media/results.
+
+### Phase 4 — UI and performance diagnostics
+
+- [ ] Add Connect iCloud on the PC and a remote library/album picker. Show source/connection state, last successful metadata scan, indexing progress, failures and reconnect instructions in Setup and the mobile gallery.
+- [ ] Phone viewers use Imadex's authenticated proxy; never expose Apple session cookies, account passwords or raw signed download URLs to the browser. No offline caching of private APIs or originals.
+- [ ] Update performance source labels to Google Drive/local/iCloud Photos. Time session refresh/challenge waits, metadata pages, preview/original request waits, streamed body reads, decoding, inference and persistence separately. Record only non-secret categories/counters, not account identifiers or remote asset/download URLs.
+- [ ] Compare iCloud remote-read timings with Google Drive and temporary local fixtures using the same encoder/runtime/input-size groups. Count reconnect/backoff waits separately from active embedding throughput.
+
+### Phase 5 — Verification and acceptance
+
+- [ ] Test authentication/challenge/session-expiry/disconnect transitions with mocks; verify secret protection/redaction, read-only adapter call paths, bounded streaming, expired URLs, redirects, retries and incomplete pagination.
+- [ ] Test stable identity, overlapping album selections, edited resource invalidation, removed membership versus deleted asset, recovery after failed reconciliation and unchanged-run embedding reuse.
+- [ ] Run existing catalog/embedding/OCR/privacy regressions; verify JPEG/HEIC extraction and ranking against temporary generated/licensed fixtures. No automatic test changes to the personal Apple library.
+- [ ] With user-completed login, run a small real iCloud pilot: enumerate a selected scope, index a handful of photos, search them, view previews/originals, restart and resume/reconnect. Observe naturally occurring library changes or request explicit user-created test changes; do not modify originals.
+- [ ] Verify authenticated phone browsing and source-specific performance reporting. Validate native Windows first; test Linux/Docker separately because protected-secret storage and authentication persistence may differ.
+- [ ] Document the tested dependency/account requirements, current feature limits, session refresh behavior, remote-original storage policy, local preview budget, secret handling and reconnect after restore.
+
+Delivery order: direct-auth/read feasibility probe, protected session/source adapter, remote catalog/media pipeline, polling/UI/performance integration, then real-account/phone acceptance. The performance recorder can proceed independently. No Windows sync client or downloaded folder is a prerequisite for this requested connector, and no claim of working direct iCloud support is made until the account probe and integration pass.

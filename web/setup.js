@@ -11,6 +11,7 @@ async function loadSetup(){
  for(const t of s.models?.towers||[]){const p=document.createElement('p');p.textContent=`${t.kind==='image'?'Image':'Text'} model · ${t.loaded?'loaded':t.cached?'cached':'download required'} · approximately ${bytes(t.estimated_bytes)} · ${t.provider}`;$('modelTowers').append(p)}
  const d=s.models?.download;$('prepareModels').disabled=!s.models||d?.running;
  $('modelDownload').textContent=d?.error|| (d?.running?`Preparing models… ${bytes(d.bytes)} added to local cache`:'Models are downloaded to this PC. Preparation also checks inference sessions.');
+ renderPerformance(s.performance);
  const o=s.ocr;
  $('ocrEnabled').checked=!!o?.enabled;$('ocrEnabled').disabled=!o?.available;
  $('retryOCR').disabled=!o?.available;

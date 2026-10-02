@@ -38,10 +38,13 @@ class BackupTests(unittest.TestCase):
                 app.initialize()
                 with app.db() as c:c.execute("INSERT INTO albums(name,created) VALUES('Family',0)")
                 (app.DATA/'google-token.json').write_text('SECRET')
+                (app.DATA/'performance').mkdir()
+                (app.DATA/'performance/events.jsonl').write_text('PRIVATE DIAGNOSTICS')
                 archive=root/'backup.zip';backup.create(app.DATA,archive)
                 backup.restore(archive,root/'restored')
                 with closing(sqlite3.connect(root/'restored/catalog.sqlite3')) as c:self.assertEqual(c.execute('SELECT name FROM albums').fetchone()[0],'Family')
                 self.assertFalse((root/'restored/google-token.json').exists())
+                self.assertFalse((root/'restored/performance').exists())
                 with self.assertRaises(ValueError):backup.restore(archive,root/'restored')
             finally:app.DATA=old
 

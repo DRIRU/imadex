@@ -14,6 +14,7 @@ from qdrant_client import QdrantClient, models
 
 import accel
 import drive
+import performance
 
 MODELS = {
     'clip': {'vision': 'Qdrant/clip-ViT-B-32-vision', 'text': 'Qdrant/clip-ViT-B-32-text', 'dimensions': 512,
@@ -34,6 +35,7 @@ def select(name):
 
 
 ACTIVE = select(os.environ.get('IMAGE_INDEX_MODEL'))
+MODEL_NAME = next(key for key,value in MODELS.items() if value is ACTIVE)
 VISION_MODEL = ACTIVE['vision']
 TEXT_MODEL = ACTIVE['text']
 MODEL_VERSION = ACTIVE['version']
@@ -78,6 +80,10 @@ class SemanticIndex:
         self.progress = {'running': False, 'processed': 0, 'message': 'Visual index ready', 'error': None}
         self.download_state = {'running': False, 'bytes': 0, 'error': None}
         self.download_lock = threading.Lock()
+        self.performance = performance.Recorder(data, db)
+        self.activity = lambda: {}
+        self.queued_at = None
+        self.image_calls = 0
         with db() as conn:
             conn.execute('''CREATE TABLE IF NOT EXISTS image_embeddings(
                 image_id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL, model TEXT NOT NULL,
@@ -117,13 +123,15 @@ class SemanticIndex:
             try:
                 if vision and self.image_model is None:
                     self.update(message='Loading image model (first use downloads model weights)…')
-                    loaded = ImageEmbedding(VISION_MODEL, **options)
-                    accel.require_requested_provider(loaded)
+                    with performance.span('image_model_load'):
+                        loaded = ImageEmbedding(VISION_MODEL, **options)
+                        accel.require_requested_provider(loaded)
                     self.image_model = loaded
                 if text and self.text_model is None:
                     self.update(message='Loading text model (first use downloads model weights)…')
-                    loaded = TextEmbedding(TEXT_MODEL, **options)
-                    accel.require_requested_provider(loaded)
+                    with performance.span('text_model_load'):
+                        loaded = TextEmbedding(TEXT_MODEL, **options)
+                        accel.require_requested_provider(loaded)
                     self.text_model = loaded
             except Exception as error:
                 if isinstance(error, UnicodeDecodeError):
@@ -175,7 +183,8 @@ class SemanticIndex:
                 with self.state_lock:
                     self.download_state.update(running=True, bytes=0, error=None)
                 threading.Thread(target=monitor, daemon=True).start()
-                self.ensure_models()
+                with self.performance.job('model_prepare',encoder=MODEL_NAME,runtime=accel.mode()),performance.timed_lock(self.model_lock,'model_lock_wait'):
+                    self.ensure_models()
             except Exception as error:
                 with self.state_lock:
                     self.download_state['error'] = str(error)
@@ -187,20 +196,27 @@ class SemanticIndex:
         threading.Thread(target=prepare, daemon=True, name='prepare-models').start()
 
     def encode_image(self, picture):
-        with self.model_lock:
+        with performance.timed_lock(self.model_lock, 'model_lock_wait'):
             self.ensure_models(text=False)
-            return normalized(next(self.image_model.embed([picture], batch_size=1)))
+            performance.metadata(image_providers=accel.session_providers(self.image_model),text_providers=accel.session_providers(self.text_model))
+            first = self.image_calls == 0;self.image_calls += 1
+            with performance.span('embedding', first_call=first):
+                vector = next(self.image_model.embed([picture], batch_size=1))
+            with performance.span('normalization'):
+                return normalized(vector)
 
     def encode_text(self, text):
         text = text.strip()
         if not text or len(text) > 500:
             raise ValueError('Enter a description between 1 and 500 characters.')
-        with self.model_lock:
+        with performance.timed_lock(self.model_lock, 'model_lock_wait'):
             if text in self.query_cache:
                 self.query_cache.move_to_end(text)
                 return self.query_cache[text]
             self.ensure_models(vision=False)
-            vector = normalized(next(self.text_model.embed([text], batch_size=1)))
+            performance.metadata(image_providers=accel.session_providers(self.image_model),text_providers=accel.session_providers(self.text_model))
+            with performance.span('text_embedding'):
+                vector = normalized(next(self.text_model.embed([text], batch_size=1)))
             self.query_cache[text] = vector
             if len(self.query_cache) > 128:
                 self.query_cache.popitem(last=False)
@@ -209,30 +225,35 @@ class SemanticIndex:
     def load_image(self, row):
         if row['size'] > MAX_IMAGE_BYTES:
             raise ValueError('Image exceeds the 64 MB embedding limit.')
-        if row['drive_id']:
-            stream = drive.request(self.data, 'files/' + row['drive_id'], {'alt': 'media', 'supportsAllDrives': 'true'})
-        else:
-            stream = Path(row['path']).open('rb')
-        with stream:
+        performance.metadata(source='drive' if row['drive_id'] else 'local',bytes=int(row['size'] or 0))
+        with performance.span('source_open'):
+            if row['drive_id']:
+                stream = drive.request(self.data, 'files/' + row['drive_id'], {'alt': 'media', 'supportsAllDrives': 'true'})
+            else:
+                stream = Path(row['path']).open('rb')
+        with performance.span('source_read'), stream:
             raw = stream.read(MAX_IMAGE_BYTES + 1)
         if len(raw) > MAX_IMAGE_BYTES:
             raise ValueError('Image exceeds the 64 MB embedding limit.')
-        if row['drive_id']:
-            if row['digest'] != row['drive_id'] and hashlib.md5(raw).hexdigest() != row['digest']:
-                raise ValueError('Image changed in Drive. Rescan the folder before indexing.')
-        elif hashlib.sha256(raw).hexdigest() != row['digest']:
-            raise ValueError('Image changed on disk. Rescan the folder before indexing.')
-        with Image.open(io.BytesIO(raw)) as image:
+        with performance.span('checksum'):
+            if row['drive_id']:
+                if row['digest'] != row['drive_id'] and hashlib.md5(raw).hexdigest() != row['digest']:
+                    raise ValueError('Image changed in Drive. Rescan the folder before indexing.')
+            elif hashlib.sha256(raw).hexdigest() != row['digest']:
+                raise ValueError('Image changed on disk. Rescan the folder before indexing.')
+        with performance.span('decode'), Image.open(io.BytesIO(raw)) as image:
             image.seek(0)
             picture = ImageOps.exif_transpose(image)
             if picture.mode in ('RGBA', 'LA') or (picture.mode == 'P' and 'transparency' in picture.info):
                 rgba = picture.convert('RGBA')
                 picture = Image.new('RGB', rgba.size, 'white')
                 picture.paste(rgba, mask=rgba.getchannel('A'))
-            return picture.convert('RGB')
+            result = picture.convert('RGB')
+            performance.metadata(width=result.width,height=result.height,pixels=result.width*result.height,bytes=len(raw))
+            return result
 
     def record(self, image_id, signature, status, error=None):
-        with self.db() as conn:
+        with performance.span('sqlite_commit'), self.db() as conn:
             conn.execute('''INSERT INTO image_embeddings VALUES(?,?,?,?,?,?) ON CONFLICT(image_id) DO UPDATE SET
                 fingerprint=excluded.fingerprint,model=excluded.model,status=excluded.status,error=excluded.error,updated=excluded.updated''',
                 (image_id, signature, MODEL_VERSION, status, error, time.time()))
@@ -262,6 +283,8 @@ class SemanticIndex:
                 'provider': ','.join(dict.fromkeys(accel.session_providers(self.image_model) + accel.session_providers(self.text_model))) or 'Not loaded'}
 
     def queue(self, retry_failed=False):
+        with self.state_lock:
+            if self.queued_at is None:self.queued_at = time.perf_counter()
         if retry_failed:
             with self.db() as conn:
                 conn.execute("UPDATE image_embeddings SET status='pending',error=NULL WHERE status='failed'")
@@ -280,11 +303,13 @@ class SemanticIndex:
             if self.stop.is_set():
                 break
             try:
-                self.index_pending()
+                with self.state_lock:
+                    queued_at = self.queued_at;self.queued_at = None
+                self.index_pending(queue_wait_ms=max(0,time.perf_counter()-queued_at)*1000 if queued_at is not None else 0)
             except Exception as error:
                 self.update(running=False, error=str(error), message='Visual indexing stopped. Retry after fixing the error.')
 
-    def index_pending(self):
+    def index_pending(self, queue_wait_ms=0):
         if not self.job_lock.acquire(blocking=False):
             return
         self.update(running=True, processed=0, error=None, message='Checking image embeddings…')
@@ -293,58 +318,15 @@ class SemanticIndex:
         try:
             with self.db() as conn:
                 job=conn.execute("INSERT INTO job_history(kind,started,status) VALUES('embeddings',?,'running')",(time.time(),)).lastrowid
-            # Remove vectors for unavailable files, including interrupted previous scans.
-            with self.db() as conn:
-                gone = [r[0] for r in conn.execute('''SELECT e.image_id FROM image_embeddings e
-                    LEFT JOIN images i ON i.id=e.image_id WHERE i.id IS NULL OR i.missing=1''')]
-            if gone:
-                with self.vector_lock:
-                    self.client.delete(self.collection, points_selector=models.PointIdsList(points=gone))
-                with self.db() as conn:
-                    conn.executemany('DELETE FROM image_embeddings WHERE image_id=?', ((item,) for item in gone))
-            for row in self.rows():
-                if self.stop.is_set():
-                    break
-                signature = fingerprint(row)
-                if row['embedded_fingerprint'] == signature and row['embedding_status'] == 'failed':
-                    continue
-                with self.vector_lock:
-                    points = self.client.retrieve(self.collection, [row['id']], with_payload=True)
-                if points and points[0].payload.get('fingerprint') == signature:
-                    if row['embedding_status'] != 'ready' or row['embedded_fingerprint'] != signature:
-                        self.record(row['id'], signature, 'ready')
-                    continue
-                self.record(row['id'], signature, 'pending')
-                self.update(message='Embedding ' + row['name'])
+            with self.performance.job('embeddings',job_id=job,encoder=MODEL_NAME,backend=self.database,batch_size=1,runtime=accel.mode()) as timing:
+                timing.queue_wait_ms = queue_wait_ms
+                if self.performance.enabled:
+                    try:performance.metadata(**self.activity())
+                    except Exception:pass # Optional diagnostic metadata cannot stop indexing.
                 try:
-                    # Identical image bytes can reuse an existing vector.
-                    with self.db() as conn:
-                        duplicate = conn.execute("SELECT image_id FROM image_embeddings WHERE fingerprint=? AND status='ready' AND image_id<>? LIMIT 1", (signature, row['id'])).fetchone()
-                    reused = []
-                    if duplicate:
-                        with self.vector_lock:
-                            reused = self.client.retrieve(self.collection, [duplicate[0]], with_vectors=True)
-                    if reused and reused[0].payload.get('fingerprint') == signature:
-                        vector = reused[0].vector
-                    else:
-                        with self.load_image(row) as picture:
-                            vector = self.encode_image(picture)
-                    # Never publish an embedding if a concurrent rescan changed its source.
-                    with self.db() as conn:
-                        current = conn.execute('SELECT * FROM images WHERE id=? AND missing=0', (row['id'],)).fetchone()
-                    if current is None or fingerprint(current) != signature:
-                        continue
-                    with self.vector_lock:
-                        self.client.upsert(self.collection, [models.PointStruct(id=row['id'], vector=vector,
-                            payload={'fingerprint': signature, 'model': MODEL_VERSION})], wait=True)
-                    self.record(row['id'], signature, 'ready')
-                except ModelUnavailable:
-                    raise
-                except Exception as error:
-                    self.record(row['id'], signature, 'failed', str(error))
-                    failures += 1
-                processed += 1
-                self.update(processed=processed)
+                    self._index_rows(timing)
+                finally:
+                    processed, failures = timing.index_counts
             self.update(message=f'Visual index updated · {processed} images processed')
         except Exception as error:
             job_error=str(error)
@@ -356,17 +338,94 @@ class SemanticIndex:
                         state='failed' if job_error or failures else 'paused' if self.stop.is_set() else 'complete'
                         conn.execute('UPDATE job_history SET finished=?,status=?,processed=?,failed_count=?,error=? WHERE id=?',
                             (time.time(),state,processed,failures,job_error,job))
-                        # Unchanged automatic checks should not bury meaningful jobs in the history.
                         if not processed and not job_error and state=='complete':conn.execute('DELETE FROM job_history WHERE id=?',(job,))
                         conn.execute('DELETE FROM job_history WHERE id NOT IN (SELECT id FROM job_history ORDER BY id DESC LIMIT 200)')
             finally:
                 self.update(running=False)
                 self.job_lock.release()
 
+    def _index_rows(self, timing):
+        processed = failures = 0
+        timing.index_counts = (0,0)
+        try:
+            with performance.span('cleanup'):
+                # Remove vectors for unavailable files, including interrupted previous scans.
+                with self.db() as conn:
+                    gone = [r[0] for r in conn.execute('''SELECT e.image_id FROM image_embeddings e
+                        LEFT JOIN images i ON i.id=e.image_id WHERE i.id IS NULL OR i.missing=1''')]
+                if gone:
+                    with self.vector_lock:
+                        self.client.delete(self.collection, points_selector=models.PointIdsList(points=gone))
+                    with self.db() as conn:
+                        conn.executemany('DELETE FROM image_embeddings WHERE image_id=?', ((item,) for item in gone))
+            with performance.span('catalog'):
+                rows = self.rows()
+            for row in rows:
+                if self.stop.is_set():
+                    break
+                with performance.image(row['id']):
+                    performance.count('visited')
+                    signature = fingerprint(row)
+                    if row['embedded_fingerprint'] == signature and row['embedding_status'] == 'failed':
+                        performance.count('failed_skipped');continue
+                    with performance.timed_lock(self.vector_lock,'vector_lock_wait'), performance.span('vector_lookup'):
+                        points = self.client.retrieve(self.collection, [row['id']], with_payload=True)
+                    if points and points[0].payload.get('fingerprint') == signature:
+                        if row['embedding_status'] != 'ready' or row['embedded_fingerprint'] != signature:
+                            self.record(row['id'], signature, 'ready')
+                        performance.count('skipped');continue
+                    self.record(row['id'], signature, 'pending')
+                    self.update(message='Embedding ' + row['name'])
+                    result = self._index_image(row,signature)
+                    if result is None:continue
+                    failures += int(not result)
+                    processed += 1
+                    timing.index_counts = (processed,failures)
+                    self.update(processed=processed)
+        finally:
+            timing.index_counts = (processed,failures)
+            if failures:timing.outcome = 'failed'
+            elif self.stop.is_set():timing.outcome = 'interrupted'
+
+    def _index_image(self,row,signature):
+        try:
+            # Identical image bytes can reuse an existing vector.
+            with performance.span('duplicate_lookup'), self.db() as conn:
+                duplicate = conn.execute("SELECT image_id FROM image_embeddings WHERE fingerprint=? AND status='ready' AND image_id<>? LIMIT 1", (signature, row['id'])).fetchone()
+            reused = []
+            if duplicate:
+                with performance.timed_lock(self.vector_lock,'vector_lock_wait'), performance.span('duplicate_vector'):
+                    reused = self.client.retrieve(self.collection, [duplicate[0]], with_vectors=True)
+            if reused and reused[0].payload.get('fingerprint') == signature:
+                vector = reused[0].vector
+            else:
+                with self.load_image(row) as picture:
+                    vector = self.encode_image(picture)
+                performance.count('inferred')
+            # Never publish an embedding if a concurrent rescan changed its source.
+            with performance.span('revision_check'), self.db() as conn:
+                current = conn.execute('SELECT * FROM images WHERE id=? AND missing=0', (row['id'],)).fetchone()
+            if current is None or fingerprint(current) != signature:
+                performance.count('stale');return None
+            with performance.timed_lock(self.vector_lock,'vector_lock_wait'), performance.span('vector_upsert'):
+                self.client.upsert(self.collection, [models.PointStruct(id=row['id'], vector=vector,
+                    payload={'fingerprint': signature, 'model': MODEL_VERSION})], wait=True)
+            self.record(row['id'], signature, 'ready')
+            performance.count('success')
+            performance.count('reused' if reused and reused[0].payload.get('fingerprint') == signature else 'new_success')
+            return True
+        except ModelUnavailable:
+            performance.count('failed')
+            raise
+        except Exception as error:
+            self.record(row['id'], signature, 'failed', str(error))
+            performance.count('failed');return False
+
     def search(self, query, where='missing=0', values=(), offset=0, limit=80):
         if not query.strip() or len(query.strip()) > 500:
             raise ValueError('Enter a description between 1 and 500 characters.')
-        return self.rank(lambda: self.encode_text(query), where, values, offset, limit)
+        with self.performance.job('search'):
+            return self.rank(lambda: self.encode_text(query), where, values, offset, limit)
 
     def similar(self, image_id, where='missing=0', values=(), offset=0, limit=80):
         """Use an existing general-image vector; never downloads another model."""
@@ -438,5 +497,6 @@ class SemanticIndex:
         if self.thread:
             self.thread.join(timeout=5)
         if not self.thread or not self.thread.is_alive():
+            self.performance.close()
             with self.vector_lock:
                 self.client.close()

@@ -10,12 +10,13 @@ if('serviceWorker' in navigator){
 $('clearShellCache').onclick=safely(async()=>{for(const name of await caches.keys())if(name.startsWith('imadex-shell-'))await caches.delete(name);toast('Installed app shell cache cleared. Private photos are never cached by the app for offline use.')});
 
 function lockGallery(){
+ if(typeof clearPerformance==='function')clearPerformance();
  if(!state.authLocked){state.authLocked=true;state.authEpoch++;state.request++}
  state.library=null;state.drive={};state.semanticResult=null;
  state.items=[];state.total=0;render();selectedPhotos.clear();updateSelection();
  for(const dialog of document.querySelectorAll('dialog[open]'))dialog.close();
  for(const id of ['fullImage','facePreviewImage'])$(id).removeAttribute('src');
- for(const id of ['photoPeople','photoFaces','metadata','recognitionSuggestions','peopleGrid','folders','albumList','savedSearchList','duplicatePairs','jobHistory','setupSummary','syncFailures'])$(id).replaceChildren();
+ for(const id of ['photoPeople','photoFaces','metadata','recognitionSuggestions','peopleGrid','folders','albumList','savedSearchList','duplicatePairs','jobHistory','setupSummary','syncFailures','performanceStages','performanceJob'])$(id).replaceChildren();
  for(const id of ['viewerName','detailName','photoOCRText','photoOCRStatus'])$(id).textContent='';$('tags').value='';
  $('offlineNotice').hidden=false;$('offlineNotice').textContent='Authentication required. Reload to sign in again.';
 }
