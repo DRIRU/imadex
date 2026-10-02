@@ -435,3 +435,7 @@ Handoff: 320px gallery verification also showed no horizontal overflow. The temp
 ## Commit checkpoint — 2026-10-02
 
 User requested committing the current changes. Included reliability/runtime setup, incremental sync/private thumbnail cache, gallery discovery/PWA, backup/verification tooling and optional OCR with their tests and documentation. Runtime data, OAuth secrets, environments, model weights and QA artifacts remain ignored. Verification evidence and outstanding Drive/Docker/Cloudflare acceptance gates above remain unchanged. This is a local Git commit; no push or deployment is requested.
+
+## GitHub publication — 2026-10-03
+
+User authorized pushing the committed changes to GitHub. Implementation commit: `80ce82b`. Target: existing `origin` remote, `https://github.com/DRIRU/imadex.git`, branch `main`. Working tree was clean before recording this checkpoint. Publish using a normal push; existing deployment/pilot acceptance gates remain open.
