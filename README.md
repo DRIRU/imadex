@@ -678,3 +678,208 @@ takes time; it resumes across restarts. False merges are possible, so keep the
 review threshold conservative and correct mistakes from an album. Recognition is
 unavailable (and clearly reported) until the ArcFace model is installed; all other
 features work without it.
+
+
+## Setup, sync and discovery
+
+Open **Setup & background jobs** to inspect Drive sign-in, encoder/cache state,
+actual loaded ONNX session providers, collection/backend, sync failures and job
+history. **Download / prepare models** loads both towers in the background. Byte
+progress measures additions to the local cache, not an exact download percentage.
+`start.ps1` uses Python UTF-8 mode for SigLIP 2 tokenizer files on Windows.
+
+Choose a dependency profile explicitly:
+
+```powershell
+.\setup-runtime.ps1 -Runtime cpu
+# Or, with a compatible NVIDIA CUDA/cuDNN runtime already configured:
+.\setup-runtime.ps1 -Runtime gpu
+```
+
+Startup preserves that profile. `IMAGE_INDEX_PROVIDER=cuda` rejects actual CPU
+fallback; `auto` permits it. Docker builds select `IMAGE_INDEX_RUNTIME=cpu|gpu`
+(default CPU); The GPU profile installs ONNX Runtime CUDA/cuDNN runtime extras. NVIDIA hardware, a compatible driver, and Docker GPU support must be provided by the host.
+Existing Qdrant collections must match the chosen encoder's dimension and cosine
+distance. Leave `QDRANT_COLLECTION` unset to retain separate per-model collections.
+
+Automatic sync is opt-in in the setup dialog. Polling defaults to 300 seconds
+(range 30–86400). Persisted Drive change checkpoints survive restarts; directory
+moves trigger membership updates, inaccessible roots preserve the catalog, and
+failed jobs back off up to one hour. Retry resets backoff; pause preserves the
+last committed page. Added roots must be independent, with no selected parent/
+child overlap. Initial listing and an explicit manual scan still read the full
+selected tree. A lost change token triggers a fresh bootstrap.
+
+Drive previews are normalized to JPEG and cached locally with a default 256 MiB
+budget (0 disables caching, maximum 2048 MiB). Content revisions invalidate old
+previews. The setup dialog shows usage and provides a clear-cache action. Original
+photo downloads for inference/viewing are not saved by this cache.
+
+**Timeline, albums & saved searches** provides monthly browsing and date ranges.
+Capture dates preserve the camera-recorded date; modified dates use UTC. The
+combined date source falls back to modified dates when capture metadata is absent;
+capture-only mode offers an Unknown date group. Timeline uses names/tag search.
+Ordinary albums are local, independent of folders and People. Select up to 100
+photos, then **Edit selected photos** to replace tags, set favorites or add/remove
+album membership. Undo survives restarts and refuses to overwrite newer edits or
+changed images. Deleting an album retains every original photo.
+
+**Find similar images** in the viewer reuses the selected photo's current vector,
+excludes it from results, and respects active filters. Scores are cosine similarity,
+not probabilities. **Compare similar copies** scans batches of 40 indexed photos
+against their nearest vector candidates. It excludes exact-checksum copies and
+allows confirmed/different reviews with undo. Reviews expire when photo content
+changes. This is candidate discovery, not exhaustive duplicate detection; visually
+similar scenes may score highly. It never deletes originals.
+
+The PWA manifest supports installation over localhost or authenticated HTTPS.
+Chrome may show **Install Imadex**; on iOS use Safari's Add to Home Screen. The
+service worker caches only the empty interface, never API data, previews or full
+photos. Offline use shows a connection notice and requires reconnection to browse.
+An authentication failure clears the shell cache and visible gallery. Clear the
+installed shell cache from setup. Phone authentication/installation still needs
+verification on your actual Cloudflare hostname and device.
+
+### Verified archive backup
+
+For a catalog archive while the app runs:
+
+```powershell
+.\.venv\Scripts\python.exe backup.py create --data data --output ..\imadex-backup.zip
+```
+
+For catalog plus embedded vectors, stop the app and add
+`--include-local-vectors`. The command acquires the store lock and refuses a live
+vector-store copy. External Qdrant requires its own server snapshot. Archives
+exclude OAuth credentials/tokens, models and regenerable thumbnails; keep the
+metadata archive private and reconnect Drive after recovery.
+
+```powershell
+.\.venv\Scripts\python.exe backup.py restore --archive ..\imadex-backup.zip --target ..\imadex-restored-data
+$env:IMAGE_INDEX_DATA = (Resolve-Path ..\imadex-restored-data).Path
+.\start.ps1
+```
+
+Restore verifies checksums, archive paths and SQLite integrity before creating a
+new directory. It refuses to overwrite an existing target. Without saved vectors,
+queue indexing to rebuild the selected collection. With external Qdrant, restore
+its matching snapshot separately and configure that server before starting.
+
+Real-model check: `.\.venv\Scripts\python.exe -X utf8 verify_embeddings.py`.
+SigLIP 2's 768-dimensional inference, text ranking and unchanged-image resume have
+passed locally. Live Drive, Docker, CUDA and phone-tunnel acceptance remain separate
+deployment checks.
+
+
+Model-switching verification (temporary catalog, shared downloaded model cache):
+` .\.venv\Scripts\python.exe -X utf8 verify_model_switching.py `.
+Service-worker privacy checks: `node --test tests/sw.test.cjs`.
+Full Python checks: `.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests -v`.
+
+Local capture dates now use EXIF DateTimeOriginal, not the EXIF editing timestamp.
+Rescan pre-existing local folders to populate that provenance; until then the
+combined timeline falls back to file modification dates for legacy local rows.
+Catalog scans, embeddings and Drive sync all appear in job history with processed/
+failed counts. Private image responses use `no-store`; the bounded server-side
+preview cache still makes repeated Drive browsing faster.
+
+
+### NVIDIA inference container
+
+Use the optional app GPU override (separate from Qdrant's GPU indexing profile):
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+```
+
+It selects the GPU dependency profile, requests one NVIDIA device, and defaults
+to explicit CUDA so an actual CPU fallback is reported as an error. The pinned
+ONNX Runtime 1.30 GPU wheel uses CUDA 13 and cuDNN 9; the GPU requirements file
+installs its matching CUDA/cuDNN extras, and provider selection preloads those
+libraries before session creation. See the [official ONNX Runtime CUDA requirements](https://onnxruntime.ai/docs/execution-providers/CUDA-ExecutionProvider.html).
+This does not install or upgrade your host graphics driver.
+
+To verify an existing Qdrant server without writing into your image collections:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 verify_qdrant_server.py --url http://127.0.0.1:6333
+```
+
+The verifier creates one uniquely named temporary collection and removes that
+collection at the end. It checks actual server writes, ranking, SQL gallery
+filters, image-vector reuse, reopen/resume and missing-point cleanup with synthetic
+vectors. Real encoder ranking is tested separately by the model verifiers. Set
+`QDRANT_API_KEY` for an authenticated server; do not put credentials in the URL.
+
+
+For a real GPU acceptance check that preserves your existing app runtime:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 verify_gpu_runtime.py --prepare
+```
+
+This installs the GPU dependency profile into `data/gpu-verification-env`, loads
+both encoders with explicit CUDA, and checks ranking and resume using temporary
+fixture catalogs and the existing shared model cache. Runtime downloads can be
+large. Later checks can omit `--prepare`.
+Add `--real-models` to `verify_qdrant_server.py` to combine server checks with real
+local encoder inference; otherwise it uses lightweight synthetic vectors.
+
+
+### Optional text search (English first)
+
+Install OCR on the PC with the project's Python 3.12 runtime:
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 setup_ocr.py
+```
+
+This creates `data/ocr-env` and leaves the embedding CPU/GPU runtime intact.
+It installs RapidOCR 1.4.4 with bundled PP-OCRv4 detection/recognition and
+orientation models, verifying their SHA-256 hashes. The model wheel is about
+14.9 MB; the separate Python runtime/dependencies require additional disk space.
+The [RapidOCR release license](https://github.com/RapidAI/RapidOCR/blob/v1.4.4/LICENSE)
+and [PaddleOCR license](https://github.com/PaddlePaddle/PaddleOCR/blob/main/LICENSE)
+are Apache-2.0. This bundled recognizer also supports Chinese; the first
+acceptance fixture and intended initial workflow are printed English.
+
+In **Setup & background jobs**, enable automatic text extraction to process
+current/new/changed images. Disable it to pause; progress resumes after restart
+when enabled. **Retry failed extraction** resets failed rows; turn automatic
+extraction on to process them. Alternatively, open a photo and choose
+**Extract / refresh text** without enabling automatic library extraction.
+Only the pending on-demand queue is transient; extracted results persist.
+
+Select **Text in images** for OCR-only search, or **Names, tags & text** for
+combined literal search. Words intersect with folder, person, album, date and
+favorite filters. Text search matches substrings (English case-insensitive),
+not semantic meanings. Visual search continues to use your existing encoder.
+Saved searches retain the selected mode. Extracted text is selectable in the
+viewer; empty results mean no confident printed text was found.
+
+Inference uses one background worker and CPU sessions with two intra-op threads.
+The existing checksum-verified loader applies orientation and preserves remote
+originals. The worker receives only an in-memory PNG up to 1600 pixels per side,
+with a 60-second timeout; it never saves source images. A generated English
+invoice fixture took approximately 2.1 seconds including process/model startup
+on this PC. That measurement is not representative of every personal image.
+Small text, complex layouts, photos and handwriting may be inaccurate; each
+image starts a fresh process to bound memory and isolate failures. No automatic
+tags or face labels are created by OCR.
+
+Text, errors, revision/model identity and timing live in `image_ocr` in the local
+SQLite catalog. Content changes and missing images hide obsolete text until
+re-extraction; model changes require fresh extraction. Text is private metadata
+and is included in catalog backups. **Clear all extracted text** pauses OCR,
+removes its catalog results and discards any in-flight result; existing backups
+retain their own copy. It preserves original images, people labels, tags and
+albums. Browser offline caches never contain OCR API results. Restore keeps
+text metadata; reinstall the platform-specific OCR environment to extract more.
+
+Container installations must create their own Linux OCR environment, rather
+than reuse a Windows `data/ocr-env`. Run `python setup_ocr.py` inside the app
+container after deployment; the base image includes OpenCV's GL runtime library.
+Actual Docker and Cloudflare phone acceptance remain pending.
+
+Real extraction/search smoke test using only temporary generated fixtures:
+` .\.venv\Scripts\python.exe -X utf8 verify_ocr.py `.

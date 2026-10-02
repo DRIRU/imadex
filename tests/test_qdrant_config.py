@@ -2,12 +2,13 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app
-from semantic import COLLECTION, SemanticIndex
+from semantic import COLLECTION, DIMENSIONS, SemanticIndex
 
 
 class FakeClient:
@@ -73,6 +74,19 @@ class QdrantConfigTests(unittest.TestCase):
         self.assertIn('path', client.kwargs)
         self.assertNotIn('url', client.kwargs)
         self.assertEqual(index.database, 'Qdrant local')
+
+    def test_existing_collection_wrong_dimension_is_preserved_and_rejected(self):
+        from qdrant_client import models
+        info=SimpleNamespace(config=SimpleNamespace(params=SimpleNamespace(vectors=models.VectorParams(size=DIMENSIONS+1,distance=models.Distance.COSINE))))
+        with patch.object(FakeClient,'collection_exists',return_value=True),patch.object(FakeClient,'get_collection',return_value=info,create=True):
+            with self.assertRaisesRegex(ValueError,'incompatible'):SemanticIndex(app.DATA,app.db)
+        self.assertIsNone(self.recorded['client'].created)
+
+    def test_credentials_in_url_are_rejected_without_echoing_secrets(self):
+        for url in ('https://user:secret@qdrant.example','https://qdrant.example?key=secret'):
+            with patch.dict(os.environ,{'QDRANT_URL':url}):
+                with self.assertRaises(ValueError) as raised:SemanticIndex(app.DATA,app.db)
+                self.assertNotIn('secret',str(raised.exception))
 
 
 if __name__ == '__main__':

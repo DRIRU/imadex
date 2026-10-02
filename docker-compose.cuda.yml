@@ -1,0 +1,16 @@
+# Optional application inference on NVIDIA. Requires Docker GPU support on the host.
+# docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+services:
+  imadex:
+    build:
+      args:
+        RUNTIME: gpu
+    environment:
+      IMAGE_INDEX_PROVIDER: "${IMAGE_INDEX_PROVIDER:-cuda}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

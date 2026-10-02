@@ -12,6 +12,13 @@ from urllib.request import Request, urlopen
 lock = threading.RLock()
 pending = {}
 SCOPE = 'https://www.googleapis.com/auth/drive.readonly'
+FILE_FIELDS = 'id,name,mimeType,size,modifiedTime,md5Checksum,imageMediaMetadata,parents,trashed'
+
+
+class DriveError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(f'Google Drive request failed ({code}). Check access, reconnect, or retry later.')
 
 
 def configuration(data):
@@ -92,12 +99,71 @@ def request(data, route, params=None):
     try:
         return urlopen(Request(url, headers={'Authorization': 'Bearer ' + access_token(data)}), timeout=60)
     except HTTPError as error:
-        raise ValueError(f'Google Drive request failed ({error.code}). Check access, reconnect, or retry later.') from None
+        raise DriveError(error.code) from None
+
+
+def children(data, parent):
+    page = None
+    while True:
+        params = {'q': f"'{parent}' in parents and trashed=false and (mimeType contains 'image/' or mimeType='application/vnd.google-apps.folder')",
+                  'fields': 'nextPageToken,incompleteSearch,files(' + FILE_FIELDS + ')', 'pageSize': 1000,
+                  'supportsAllDrives': 'true', 'includeItemsFromAllDrives': 'true'}
+        if page:
+            params['pageToken'] = page
+        with request(data, 'files', params) as response:
+            result = json.load(response)
+        if result.get('incompleteSearch'):
+            raise ValueError('Drive returned an incomplete listing. Retry without changing the current catalog.')
+        yield from result.get('files', [])
+        page = result.get('nextPageToken')
+        if not page:
+            return
+
+
+def walk_nodes(data, root):
+    root_file = metadata(data, root, FILE_FIELDS)
+    if root_file.get('trashed') or root_file.get('mimeType') != 'application/vnd.google-apps.folder':
+        raise ValueError('Selected Drive root is unavailable or no longer a folder.')
+    yield root_file
+    queue, visited = [root], set()
+    while queue:
+        parent = queue.pop()
+        if parent in visited:
+            continue
+        visited.add(parent)
+        for file in children(data, parent):
+            yield file
+            if file['mimeType'] == 'application/vnd.google-apps.folder':
+                queue.append(file['id'])
+
+
+def start_cursor(data):
+    with request(data, 'changes/startPageToken', {'supportsAllDrives': 'true'}) as response:
+        return json.load(response)['startPageToken']
+
+
+def changes_page(data, cursor):
+    with request(data, 'changes', {'pageToken': cursor, 'pageSize': 1000, 'spaces': 'drive',
+        'includeRemoved': 'true', 'supportsAllDrives': 'true', 'includeItemsFromAllDrives': 'true',
+        'fields': 'nextPageToken,newStartPageToken,changes(fileId,removed,file(' + FILE_FIELDS + '))'}) as response:
+        return json.load(response)
 
 
 def metadata(data, file_id, fields):
     with request(data, 'files/' + file_id, {'fields': fields, 'supportsAllDrives': 'true'}) as response:
         return json.load(response)
+
+
+def ancestors(data, file_id):
+    """Resolve parent IDs for selected-root overlap checks without listing photos."""
+    visited=set();queue=[file_id]
+    while queue:
+        key=queue.pop()
+        if key in visited:continue
+        visited.add(key)
+        file=metadata(data,key,'id,parents')
+        queue.extend(file.get('parents',[]))
+    return visited
 
 
 def walk(data, folder_id):

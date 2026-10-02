@@ -1,5 +1,7 @@
 """Run a real image-model/Qdrant smoke test without touching the personal catalog."""
 import tempfile
+import os
+from unittest.mock import patch
 from pathlib import Path
 import app
 from PIL import Image
@@ -19,7 +21,10 @@ def main():
             folder = conn.execute('INSERT INTO folders(path) VALUES(?)', (str(pictures),)).lastrowid
         app.scan_lock.acquire()
         app.scan(folder)
-        index = SemanticIndex(app.DATA, app.db, model_cache=old_data / 'models')
+        # Environment configuration must not point this smoke test at personal
+        # external collections. Server validation uses a separate deployment check.
+        with patch.dict(os.environ, {'QDRANT_URL':'','QDRANT_COLLECTION':'','QDRANT_API_KEY':''}):
+            index = SemanticIndex(app.DATA, app.db, model_cache=old_data / 'models')
         try:
             index.index_pending()
             status = index.status()

@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from datetime import datetime
 import drive
 import people
+import gallery
+import ocr
 import recognition
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,6 +32,9 @@ scan_status = {'running': False, 'processed': 0, 'errors': [], 'message': 'Ready
 semantic_index = None
 face_detector = None
 recognizer = None
+synchronizer = None
+thumbnail_cache = None
+ocr_service = None
 
 
 def configure_access(server, public_origin=None, password=None):
@@ -50,6 +55,7 @@ def configure_access(server, public_origin=None, password=None):
 def db():
     conn = sqlite3.connect(DATA / 'catalog.sqlite3', timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.create_function("image_day", 3, gallery.image_day, deterministic=True)
     conn.execute("PRAGMA foreign_keys=ON")
     conn.create_function("content_revision", 4, people.revision, deterministic=True)
     try:
@@ -77,10 +83,18 @@ def initialize():
         columns = {row[1] for row in conn.execute('PRAGMA table_info(images)')}
         if 'drive_id' not in columns:
             conn.execute('ALTER TABLE images ADD COLUMN drive_id TEXT')
+        if 'taken_source' not in columns:
+            conn.execute("ALTER TABLE images ADD COLUMN taken_source TEXT NOT NULL DEFAULT ''")
         people.migrate(conn)
         from detection import migrate as migrate_detection
         migrate_detection(conn)
         recognition.migrate(conn)
+        from sync import migrate as migrate_sync
+        from thumbnails import migrate as migrate_thumbnails
+        migrate_sync(conn)
+        migrate_thumbnails(conn)
+        gallery.migrate(conn)
+        ocr.migrate(conn)
 
 
 def scan_drive(folder_id, root_id):
@@ -99,6 +113,7 @@ def scan_drive(folder_id, root_id):
                datetime.fromisoformat(file['modifiedTime'].replace('Z','+00:00')).timestamp(),
                media.get('width',0),media.get('height',0),media.get('time',''),media.get('cameraModel',''),
                file.get('md5Checksum',file['id']),file['id']))
+            conn.execute("UPDATE images SET taken_source='drive' WHERE path=?",(key,))
         processed += 1
         set_status(processed=processed, message=f"Indexing {file['name']}")
     with db() as conn:
@@ -106,6 +121,7 @@ def scan_drive(folder_id, root_id):
             if row['path'] not in seen:
                 conn.execute('UPDATE images SET missing=1 WHERE id=?', (row['id'],))
         conn.execute('UPDATE folders SET scanned_at=? WHERE id=?', (time.time(), folder_id))
+        conn.execute('UPDATE sync_sources SET cursor=NULL,next_run=0 WHERE folder_id=?', (folder_id,))
     set_status(message=f'Scan complete · {processed:,} images checked')
 
 
@@ -115,8 +131,12 @@ def set_status(**values):
 
 
 def scan(folder_id):
+    job=None;job_error=None
+    set_status(processed=0,errors=[])
     try:
         with db() as conn:
+            job=conn.execute("INSERT INTO job_history(kind,source_id,started,status) VALUES('catalog-scan',?,?,'running')",(folder_id,time.time())).lastrowid
+            conn.commit()
             folder = conn.execute('SELECT * FROM folders WHERE id=?', (folder_id,)).fetchone()
             if folder['path'].startswith('gdrive:'):
                 scan_drive(folder_id, folder['path'].split(':')[1])
@@ -139,7 +159,7 @@ def scan(folder_id):
                 try:
                     info = path.stat()
                     old = known.get(key)
-                    if old and old['size'] == info.st_size and old['mtime'] == info.st_mtime and (DATA / 'thumbnails' / (old['digest'] + '.jpg')).exists():
+                    if old and old['taken_source'] and old['size'] == info.st_size and old['mtime'] == info.st_mtime and (DATA / 'thumbnails' / (old['digest'] + '.jpg')).exists():
                         with db() as conn:
                             conn.execute('UPDATE images SET missing=0 WHERE id=?', (old['id'],))
                     else:
@@ -147,7 +167,8 @@ def scan(folder_id):
                             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
                         with Image.open(path) as source:
                             exif = source.getexif()
-                            taken = str(exif.get(306, ''))
+                            original_exif = exif.get_ifd(34665) if 34665 in exif else {}
+                            taken = str(original_exif.get(36867, exif.get(36867, '')))
                             camera = str(exif.get(272, ''))
                             picture = ImageOps.exif_transpose(source)
                             width, height = picture.size
@@ -164,6 +185,7 @@ def scan(folder_id):
                             mtime=excluded.mtime,width=excluded.width,height=excluded.height,taken=excluded.taken,
                             camera=excluded.camera,digest=excluded.digest,missing=0''',
                             (folder_id,key,name,path.suffix.lower()[1:],info.st_size,info.st_mtime,width,height,taken,camera,digest))
+                            conn.execute("UPDATE images SET taken_source='exif-original' WHERE path=?",(key,))
                 except Exception as error:
                     errors.append(f'{name}: {error}')
                 processed += 1
@@ -175,8 +197,14 @@ def scan(folder_id):
             conn.execute('UPDATE folders SET scanned_at=? WHERE id=?', (time.time(), folder_id))
         set_status(message=f'Scan complete · {processed:,} images checked', errors=errors[-20:])
     except Exception as error:
+        job_error=str(error)
         set_status(message=f'Scan failed: {error}')
     finally:
+        if job is not None:
+            with status_lock:counts=dict(scan_status)
+            with db() as conn:
+                conn.execute('UPDATE job_history SET finished=?,status=?,processed=?,failed_count=?,error=? WHERE id=?',
+                    (time.time(),'failed' if job_error or counts['errors'] else 'complete',counts['processed'],len(counts['errors']),job_error or '\n'.join(counts['errors']) or None,job))
         set_status(running=False)
         scan_lock.release()
         if semantic_index is not None:
@@ -245,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Type', content_type or mimetypes.guess_type(str(path))[0] or 'application/octet-stream')
             self.send_header('Content-Length', str(os.fstat(stream.fileno()).st_size))
             self.send_header('X-Content-Type-Options', 'nosniff')
-            self.send_header('Cache-Control', 'private, max-age=300' if content_type or path.suffix.lower() in EXTENSIONS else 'no-cache')
+            self.send_header('Cache-Control', 'private, no-store' if content_type or path.suffix.lower() in EXTENSIONS else 'no-cache')
             self.end_headers()
             try:
                 while chunk := stream.read(256 * 1024):
@@ -267,6 +295,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Location', '/')
                 self.end_headers()
                 return
+            if url.path == '/api/gallery':
+                return self.respond(gallery.Gallery(db).listing())
+            if url.path == '/api/ocr':
+                if ocr_service is None:return self.respond({'error':'OCR service unavailable'},503)
+                return self.respond(ocr_service.status(params.get('image_id')))
+            if url.path == '/api/setup':
+                import accel
+                return self.respond({'drive':drive.state(DATA),'embedding':semantic_index.status() if semantic_index else None,
+                    'models':semantic_index.model_status() if semantic_index else None,
+                    'sync':synchronizer.status() if synchronizer else None,
+                    'thumbnail_cache':thumbnail_cache.status() if thumbnail_cache else None,
+                    'ocr':ocr_service.status() if ocr_service else None,
+                    'access':{'tunnel_configured':bool(getattr(self.server,'public_origin',None)),
+                              'authenticated':bool(getattr(self.server,'access_password',None))},
+                    'requested_provider':accel.mode()})
+            if url.path == '/api/sync':
+                return self.respond(synchronizer.status() if synchronizer else {'enabled':False,'running':False,'jobs':[]})
             if url.path == '/api/drive':
                 return self.respond({**drive.state(DATA), 'can_connect': self.on_pc()})
             if url.path == '/api/people':
@@ -301,12 +346,17 @@ class Handler(BaseHTTPRequestHandler):
                     COUNT(*)-COUNT(DISTINCT digest) AS duplicates FROM images WHERE missing=0''').fetchone())
                     formats = [r[0] for r in conn.execute('SELECT DISTINCT extension FROM images WHERE missing=0 ORDER BY extension')]
                     return self.respond({'folders': folders, 'stats': stats, 'formats': formats})
-                if url.path == '/api/images':
+                if url.path in ('/api/images','/api/similar','/api/timeline','/api/near-duplicates'):
                     clauses, values = ['missing=0'], []
-                    semantic_query = params.get('mode') == 'semantic' and bool(params.get('q', '').strip())
+                    similar_id = params.get('similar') or (params.get('image_id') if url.path == '/api/similar' else None)
+                    semantic_query = url.path != '/api/timeline' and (bool(similar_id) or params.get('mode') == 'semantic' and bool(params.get('q', '').strip()))
                     for word in ([] if semantic_query else params.get('q', '').split()):
-                        clauses.append('(name LIKE ? OR path LIKE ? OR tags LIKE ? OR camera LIKE ?)')
-                        values.extend(['%' + word + '%'] * 4)
+                        text_clause, text_values = ocr.text_filter(word)
+                        if params.get('mode') == 'ocr':
+                            clauses.append(text_clause);values.extend(text_values)
+                        else:
+                            clauses.append('(name LIKE ? OR path LIKE ? OR tags LIKE ? OR camera LIKE ? OR '+text_clause+')')
+                            values.extend(['%' + word + '%'] * 4 + text_values)
                     if params.get('folder'):
                         clauses.append('folder_id=?'); values.append(int(params['folder']))
                     if params.get('format'):
@@ -323,15 +373,23 @@ class Handler(BaseHTTPRequestHandler):
                         clauses.append('id IN (SELECT image_id FROM detections WHERE model=?)')
                         values.append(detection_model)
                         clauses.append("id IN (SELECT image_id FROM detections WHERE status='ready' AND region_count>0 AND revision=content_revision(images.digest,images.drive_id,images.size,images.mtime)) AND NOT EXISTS (SELECT 1 FROM image_people ip WHERE ip.image_id=images.id AND ip.revision=content_revision(images.digest,images.drive_id,images.size,images.mtime))")
+                    day_expr = gallery.date_filters(params,clauses,values)
                     where = ' AND '.join(clauses)
+                    if url.path == '/api/timeline':
+                        months=[dict(r) for r in conn.execute("SELECT substr("+day_expr+",1,7) AS month,COUNT(*) AS count FROM images WHERE "+where+" GROUP BY month ORDER BY month DESC",values)]
+                        return self.respond({'months':months,'date_basis':params.get('date_basis','best')})
                     order = {'newest': 'mtime DESC,id DESC', 'oldest': 'mtime ASC,id ASC', 'name': 'name COLLATE NOCASE,id', 'largest': 'size DESC,id DESC'}.get(params.get('sort'), 'mtime DESC,id DESC')
                     if params.get('view') == 'duplicates':
                         order = 'digest,' + order
+                    if params.get('sort') == 'date':order = day_expr+' DESC,id DESC'
                     offset = max(0, int(params.get('offset', 0)))
+                    if url.path == '/api/near-duplicates':
+                        if semantic_index is None:raise ValueError('Embedding service unavailable.')
+                        return self.respond(semantic_index.near_duplicates(where,values,offset,float(params.get('threshold',0.98))))
                     if semantic_query:
                         if semantic_index is None:
                             return self.respond({'error': 'Embedding service is unavailable. Start the app with start.ps1.'}, 503)
-                        result = semantic_index.search(params['q'], where, values, offset)
+                        result = semantic_index.similar(similar_id, where, values, offset) if similar_id else semantic_index.search(params['q'], where, values, offset)
                         for row in result['items']:
                             row['revision'] = people.image_revision(row)
                         return self.respond(result)
@@ -345,12 +403,22 @@ class Handler(BaseHTTPRequestHandler):
                     if not row:
                         return self.respond({'error': 'Image not found'}, 404)
                     thumb = url.path.startswith('/thumb/')
+                    if row['drive_id'] and thumb and thumbnail_cache is not None:
+                        raw=thumbnail_cache.get(row)
+                        self.send_response(200)
+                        self.send_header('Content-Type','image/jpeg')
+                        self.send_header('Content-Length',str(len(raw)))
+                        self.send_header('Cache-Control','private, no-store')
+                        self.send_header('X-Content-Type-Options','nosniff')
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
                     if row['drive_id']:
                         remote = drive.thumbnail(DATA, row['drive_id']) if thumb else drive.request(DATA, 'files/' + row['drive_id'], {'alt': 'media', 'supportsAllDrives': 'true'})
                         with remote:
                             self.send_response(200)
                             self.send_header('Content-Type', remote.headers.get('Content-Type', 'application/octet-stream'))
-                            self.send_header('Cache-Control', 'private, max-age=300')
+                            self.send_header('Cache-Control', 'private, no-store')
                             self.send_header('X-Content-Type-Options', 'nosniff')
                             self.send_header('Content-Security-Policy', "sandbox; default-src 'none'")
                             if remote.headers.get('Content-Length'):
@@ -363,7 +431,7 @@ class Handler(BaseHTTPRequestHandler):
                                 pass
                         return
                     return self.send_file(DATA / 'thumbnails' / (row['digest'] + '.jpg') if thumb else Path(row['path']), 'image/jpeg' if thumb else None)
-            static = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/mobile.css': 'mobile.css', '/semantic.css': 'semantic.css', '/favicon.svg': 'favicon.svg', '/people.js': 'people.js', '/people.css': 'people.css'}
+            static = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/mobile.css': 'mobile.css', '/semantic.css': 'semantic.css', '/favicon.svg': 'favicon.svg', '/people.js': 'people.js', '/people.css': 'people.css', '/setup.js': 'setup.js', '/setup.css': 'setup.css', '/discovery.js': 'discovery.js', '/discovery.css': 'discovery.css', '/duplicates.js': 'duplicates.js', '/pwa.js': 'pwa.js', '/sw.js': 'sw.js', '/manifest.webmanifest': 'manifest.webmanifest', '/icon-192.png': 'icon-192.png', '/icon-512.png': 'icon-512.png'}
             if url.path in static:
                 return self.send_file(BASE / 'web' / static[url.path])
             self.respond({'error': 'Not found'}, 404)
@@ -382,6 +450,21 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError('JSON object required')
+            if self.path == '/api/gallery':
+                return self.respond(gallery.Gallery(db).mutate(payload))
+            if self.path == '/api/ocr':
+                if ocr_service is None:raise ValueError('OCR service unavailable')
+                return self.respond(ocr_service.action(payload))
+            if self.path == '/api/models/prepare':
+                if semantic_index is None:raise ValueError('Embedding service unavailable')
+                semantic_index.prepare_models()
+                return self.respond({'ok':True})
+            if self.path == '/api/sync':
+                if synchronizer is None:raise ValueError('Sync service unavailable')
+                return self.respond(synchronizer.action(payload))
+            if self.path == '/api/thumbnails':
+                if thumbnail_cache is None:raise ValueError('Thumbnail service unavailable')
+                return self.respond(thumbnail_cache.action(payload))
             if self.path == '/api/people':
                 return self.respond(people.People(db).mutate(payload))
             if self.path == '/api/detection':
@@ -415,6 +498,11 @@ class Handler(BaseHTTPRequestHandler):
                         key = 'gdrive:' + file_id + ':' + folder['name']
                         if conn.execute('SELECT id FROM folders WHERE path LIKE ?', ('gdrive:' + file_id + ':%',)).fetchone():
                             raise ValueError('This folder is already in your library.')
+                        existing_roots=[r['path'].split(':')[1] for r in conn.execute("SELECT path FROM folders WHERE path LIKE 'gdrive:%'")]
+                        if existing_roots:
+                            parents=drive.ancestors(DATA,file_id)
+                            if any(root in parents or file_id in drive.ancestors(DATA,root) for root in existing_roots):
+                                raise ValueError('An overlapping Drive parent/subfolder is already selected. Choose independent roots.')
                         cursor = conn.execute('INSERT INTO folders(path) VALUES(?)', (key,))
                         conn.commit()
                         return self.respond({'id': cursor.lastrowid}, 201)
@@ -457,6 +545,8 @@ if __name__ == '__main__':
     parser.add_argument('--public-origin', default=os.environ.get('FRAME_PUBLIC_ORIGIN'), help='Exact HTTPS tunnel origin. Requires FRAME_PASSWORD.')
     args = parser.parse_args()
     initialize()
+    with db() as conn:
+        conn.execute("UPDATE job_history SET status='interrupted',finished=? WHERE status='running'",(time.time(),))
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     try:
         configure_access(server, args.public_origin, os.environ.get('FRAME_PASSWORD'))
@@ -466,6 +556,13 @@ if __name__ == '__main__':
     from semantic import SemanticIndex
     semantic_index = SemanticIndex(DATA, db)
     semantic_index.start()
+    ocr_service = ocr.OCR(DATA, db, semantic_index.load_image)
+    ocr_service.start()
+    from thumbnails import ThumbnailCache
+    thumbnail_cache = ThumbnailCache(DATA,db)
+    from sync import Synchronizer
+    synchronizer = Synchronizer(DATA,db,scan_lock,on_updated=lambda:semantic_index.queue())
+    synchronizer.start()
     from detection import Detector
     face_detector = Detector(DATA, db, semantic_index.load_image)
     face_detector.start()
@@ -477,6 +574,8 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         server.server_close()
     finally:
+        ocr_service.close()
+        synchronizer.close()
         face_detector.close()
         recognizer.close()
         semantic_index.close()

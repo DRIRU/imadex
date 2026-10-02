@@ -1,6 +1,6 @@
 # Personal image index — plan and progress
 
-Last updated: 2026-09-23 (Asia/Calcutta)
+Last updated: 2026-10-02 (Asia/Calcutta)
 
 ## Working agreement
 
@@ -250,7 +250,188 @@ Open decision to settle first: the runtime path. DINOv3 is not in FastEmbed, so 
 - UI: "Find similar" action in the photo viewer; results in the existing paginated gallery; opt-in enable with progress/retry like the other pipelines.
 - Effort/risk: much larger than Phase 1 — new model runtime, gated weights, and a new search UI. Best done after Phase 1 is validated against a real library.
 
+## Manual changes studied — 2026-10-02
+
+User requested review and understanding of their manual changes. Application code and configuration were left unchanged; only this progress record was updated.
+
+- Reviewed committed changes through `8e9b4b4`; the working tree was clean before this review.
+- Current architecture: SigLIP 2 is the default image/text encoder (768 dimensions), CLIP remains selectable (512 dimensions), Qdrant can be embedded or external, and ONNX provider selection is configurable. Docker packaging and the Imadex rebrand are present. The separately added ArcFace feature is recorded in the project history. DINOv3 remains a design only.
+- Confirmed the installed FastEmbed registry includes both SigLIP 2 towers with 768 dimensions (vision 0.37 GB, text 1.13 GB).
+- Ran 34 tests covering catalog/authentication, manual People labels, face-region detection state, semantic indexing/search, model selection, Qdrant configuration, and provider selection: all passed. Recognition tests and real identity inference were not run as part of this review.
+- Installed ONNX Runtime is 1.30.0 and advertises Azure/CPU providers; CUDA is unavailable in this environment. Docker is not available on the current PATH. No models were downloaded, servers restarted, or personal-library state changed.
+- Real SigLIP 2 inference, a live external Qdrant server, Docker execution, and CUDA inference remain unverified here. Historical test counts above refer to earlier checkpoints.
+
+### Review observations for later work
+
+- `requirements.txt` pins the CPU `onnxruntime` package and `start.ps1` reinstalls requirements on every launch. The documented manual GPU-package swap therefore needs a separate dependency/startup path to avoid reinstalling the CPU package beside it.
+- Provider status is derived from `get_available_providers()` rather than the loaded inference session; a CUDA-capable package can be reported as GPU even if session initialization falls back to CPU.
+- A fixed `QDRANT_COLLECTION` override bypasses per-model collection naming, and startup does not validate an existing collection's vector dimensions. Switching between 512-d and 768-d models with the same override can fail on writes. `.env.example` still suggests a CLIP collection despite the SigLIP 2 default.
+- The Compose healthcheck catches every HTTP error as success, including 404/500, although its intended exception is authenticated 401.
+- Compose does not forward `IMAGE_INDEX_PROVIDER` or `QDRANT_TIMEOUT`. The README's external-Qdrant paragraph still names the CLIP collection as the default.
+- The model-selection tests assume the default model even when `IMAGE_INDEX_MODEL=clip` is explicitly configured; a test run under that supported configuration will need environment isolation.
+
+These are recorded findings, not fixes. Continue from the user's current implementation and preserve their commits.
+
+## Suggested next stages — 2026-10-02
+
+Status: stages 1–3 authorized for implementation on 2026-10-02; work is active. The full scope below remains the completion target.
+
+### Stage 1 — A reliable personal-library release (recommended first)
+
+- [ ] Fix the configuration gaps recorded in the review: CPU/GPU dependency paths, actual session-provider reporting, Qdrant model/dimension validation, Compose environment passthrough and healthcheck, and environment-isolated model tests.
+- [ ] Add a setup/status page that reports Drive connection, active encoder, model availability/download progress, actual inference provider, vector backend, and actionable failures. Never expose tokens, passwords, or API keys.
+- [ ] Verify real SigLIP 2 image/text inference and model switching against a temporary catalog; verify an external Qdrant server and Docker on an available installation.
+- [ ] Connect a small real Drive folder, confirm original-file reads and search quality, measure initial/incremental indexing time, and test interrupted-work recovery. Expand the library only after this pilot passes.
+- [ ] Validate authenticated Cloudflare access from the phone, including slow network behavior and expired authentication; document the working deployment.
+- [ ] Make a catalog/data backup and demonstrate recovery with a temporary copy. Document vector-store changes and reconciliation.
+
+Acceptance: a real Drive pilot is searchable on PC and phone, an unchanged scan avoids new embedding inference, interrupted work resumes, and reported model/provider/backend match the running services.
+
+### Stage 2 — Keep the library current
+
+- [ ] Add incremental Drive synchronization with persisted change cursors and safe handling of renamed, changed, moved, and removed files within selected roots.
+- [ ] Offer configurable polling, pause/resume, bounded retries/backoff, and per-stage progress. Failed scans must not mark the library missing.
+- [ ] Cache private thumbnails with a bounded storage budget and content-based invalidation to improve phone browsing; retain Drive originals remotely.
+- [ ] Add a job history with completed/failed counts and durations so indexing problems are easy to diagnose.
+
+Acceptance: selected folders update without routine full rescans; reconnecting or restarting preserves sync state; revoked access produces a clear recovery action.
+
+### Stage 3 — Better gallery discovery
+
+- [ ] Add date ranges, a timeline/calendar view, and saved searches. Distinguish capture date from file-modified date and handle missing dates.
+- [ ] Add ordinary albums independent of Drive folders, with bulk tags/favorites and undo for metadata edits.
+- [ ] Add a mobile installable PWA shell with explicit authentication handling. Any offline cache of private photos must be an explicit setting, clearable by the user.
+- [ ] Add “Find similar” for general image-content similarity using the existing SigLIP 2/CLIP vectors first; exclude the selected image, respect filters, and label scores as similarity rather than probabilities.
+- [ ] Evaluate visual near-duplicate suggestions separately from exact checksum duplicates; provide comparison/review before any action. Do not delete originals automatically.
+
+Acceptance: common browsing tasks work with one hand on a phone, saved searches are persistent, and image-similarity results are useful on the real library without another model download.
+
+### Stage 4 — Optional deeper image search
+
+- [ ] Consider local OCR for screenshots/documents and combine its text with filename/tag search. Verify language support, model license, and measured CPU cost before choosing a runtime.
+- [ ] Revisit the existing DINOv3 design only after measuring whether the current image-to-image search needs improvement. Keep that model optional, and verify its distribution/license/runtime before implementation.
+
+Suggested immediate scope: Stage 1. The later stages can be selected independently after the pilot identifies the user's most frequent tasks.
+
+### Active implementation checkpoints — 2026-10-02
+
+- [ ] Reliability: dependency profiles, session-provider reporting, collection validation, Compose fixes, setup/status page, model and deployment verification, backup/restore exercise.
+- [ ] Synchronization: persisted Drive change cursors, selected-root membership, pause/resume, retry/backoff, private bounded thumbnail cache, job history.
+- [ ] Gallery: dates/timeline, custom albums, saved searches, bulk metadata edits/undo, mobile PWA with authentication-aware caching, image-content similarity and near-duplicate review.
+- Live pilot prerequisites are absent: Google OAuth client/token, selected pilot folder, Cloudflare hostname/connector, and Docker executable. Requested pilot folder/hostname while independent implementation continues. No account or public-access configuration has been assumed.
 
 
 
 
+
+## Next-stage prioritization — 2026-10-02
+
+User requested recommendations for the next stage. Reviewed the current working tree and API/UI integration; this checkpoint does not certify the in-progress changes.
+
+Recommended order:
+1. Finish and verify the existing reliability/synchronization work: setup UI, persisted Drive sync, thumbnail-cache controls, recovery tests, and a small real-library/phone pilot. Backend additions are present but integration and acceptance remain incomplete.
+2. Complete gallery discovery: image-to-image similarity using existing vectors, timeline/date filters, ordinary albums, saved searches, bulk metadata undo, and mobile PWA installation. These remain the existing stage-3 scope, not a new completed phase.
+3. After the pilot, consider optional local OCR for searchable screenshots/documents, metadata portability (albums/tags/people labels export/import), and browsing performance measured on a larger library.
+4. Evaluate another visual model only if the existing encoder's measured similarity quality is insufficient.
+
+No additional feature implementation was started by this recommendation request. Previously recorded external verification prerequisites remain unresolved.
+
+## Implementation checkpoint — 2026-10-02
+
+Authoritative changes made during the active stages 1–3 goal:
+
+- CPU/GPU dependency profiles and a setup script; startup preserves the selected profile. Compose passes runtime/provider/timeout, healthchecks accept only intended 401 errors. Existing vector collection dimensions/distance are validated, and actual loaded inference providers are reported.
+- Added setup/status dialog with model preparation, approximate cache-byte progress, Drive/access readiness, sync controls, thumbnail budget/clear controls and job history.
+- Added persisted selected-root Drive change cursors, bootstrap-before-listing checkpoints, transactional per-page publication, directory move/removal handling, pause/resume and capped retry backoff. Overlapping selected roots are rejected to preserve folder ownership.
+- Added bounded private Drive JPEG preview cache with revision invalidation; originals remain remote.
+- Added date ranges/month timeline with capture/modified distinction, independent albums, persistent saved searches, bulk tags/favorites/album edits and conflict-aware undo.
+- Added general-content Find similar using existing vectors and separate near-duplicate candidate comparison/review with content-revision invalidation. No automatic original deletion.
+- Added PWA shell/manifest/icons. Service worker caches only interface assets, handles 401 by clearing cache/notifying UI, and does not persist private images/API results for offline use.
+- Added checksum-verified backup archive/new-directory restore, optional locked local vector copy and credential exclusion.
+
+Verification so far:
+- Existing 44-test suite passed at the initial checkpoint (before new gallery tests).
+- Real default SigLIP 2: 768-d image/text inference passed all three RGB ranking checks; unchanged second pass processed zero images. First run exposed Windows cp1252 tokenizer decoding; `start.ps1` now uses `-X utf8`, and a rerun passed.
+- Eight new synchronization/cache tests passed: bootstrap race, folder move out/in, per-page failure checkpoints, pause mid-response, unrelated changes, root removal, job backoff/retry, revision/budget/disabled-cache behavior.
+- Six organization/date/undo tests passed; ten semantic tests passed including image-vector reuse/filtering and duplicate review invalidation; two backup tests passed including restore and corruption rejection.
+- JavaScript syntax checks passed. Temporary browser gallery verified setup status, album/search creation, bulk favorite/album assignment, undo, and source-excluding similar results. Discovery dialog inspected at 390×844 phone viewport.
+
+Still required: complete current full-suite/configuration checks, broader authenticated HTTP/PWA/mobile verification, vector-backup restoration verification, external Qdrant/Docker/CUDA checks where available, real selected Drive pilot and Cloudflare phone acceptance. Do not mark stages 1–3 complete based on these local checks alone.
+
+### Latest verification and remaining gates — 2026-10-02
+
+- Default-model full suite: 70 tests passed before the final job-history/orphan-cache additions. CLIP-configured final suite: 72 tests passed; default final rerun still in progress at this checkpoint.
+- Three Node service-worker tests passed: offline shell fallback, no offline API/photo fallback, and 401 cache purge/client notification. Private image responses now use `private, no-store` to avoid implicit browser disk caching. Authentication failure clears visible gallery/viewer data even without an active service worker.
+- Real model-switching verifier passed SigLIP 2 → CLIP → SigLIP 2 against one temporary catalog: processed counts 2, 2, 0. Both encoders also passed separate real ranking/resume checks. Verifiers isolate vector storage from any configured production external collection.
+- Backup roundtrip now includes embedded vectors; a restored Qdrant collection returned its original vector. Live-store copying is rejected using the actual Qdrant lock. Archive corruption is rejected before the restore directory is created.
+- Authenticated HTTP verification covers the new setup/gallery/sync/timeline/duplicate APIs and PWA assets. Unauthenticated requests received 401; date filters/timeline and album creation worked with authentication; status did not expose the password.
+- New tests passed for capped repeated change-token rejection, overlapping-root preservation, actual DateTimeOriginal extraction/legacy rescan, meaningful embedding job counts, and cleanup of owned orphan thumbnail files.
+- Browser QA verified phone-width duplicate comparison, confirmed decision and undo. Screenshot: `data/mobile-duplicate-review-qa.jpg` (temporary generated fixture images only). Temporary QA server was stopped. Automatic approval review rejected removal of two QA temporary directories with only “blocked by policy”; those directories were left in place.
+- Job history now includes catalog scans, embeddings and Drive sync, with processed/failed counts and duration. Interrupted jobs are recovered before startup workers begin.
+- Legacy local EXIF DateTime is not treated as capture date. Rescanning reads DateTimeOriginal and refreshes provenance; until then local legacy dates use the modified-date fallback. Drive capture metadata remains supported.
+
+Implementation is present across stages 1–3, but release acceptance is still unproven. Remaining gates:
+1. Finish final default-suite observation and review current diff/configuration. Validate live external Qdrant and Docker deployment when available; GPU execution requires its own configured runtime.
+2. Real Drive pilot: OAuth client/token, an independent selected root, initial/incremental timing, changed/moved/removed files and reconnect/restart behavior on the actual account. Current Drive state is configured=false, connected=false.
+3. Real Cloudflare hostname/connector and phone: authenticated access, slow-network behavior, expired authentication, PWA installation and search-quality acceptance. Docker and cloudflared are unavailable on PATH here.
+4. Validate gallery usefulness/near-duplicate quality on the pilot library; fixture ranking and layout tests do not prove personal-photo quality or phone deployment.
+
+The persistent goal remains active; no completion claim has been made.
+
+Final local verification: 72 Python tests passed under the default SigLIP 2 configuration and 72 passed with IMAGE_INDEX_MODEL=clip. Three service-worker tests and JavaScript syntax checks passed. git diff --check reported no whitespace errors. Live deployment/pilot gates above remain open.
+
+## Deployment verification continuation — 2026-10-02
+
+The previous goal turn made implementation/verification progress. Rechecked current code and remaining gates rather than treating earlier plans as completion evidence.
+
+- Found a real packaging gap in optional GPU deployment: the app container requested no NVIDIA device and the base GPU dependencies omitted CUDA/cuDNN runtime packages. Added `docker-compose.cuda.yml` to select GPU build/profile, request one device and default to explicit CUDA. GPU requirements now use ONNX Runtime's matching CUDA/cuDNN extras, and generic provider selection preloads runtime libraries before session creation. Official ONNX documentation confirms the pinned 1.30 GPU wheel uses CUDA 13/cuDNN 9. Provider-selection tests pass and Docker Compose successfully rendered the combined configuration.
+- Located Docker Desktop 4.40.0 and its CLI outside PATH. Launching the installed desktop produced a startup failure in its analytics socket (`userAnalyticsOtlpHttp.sock`); the engine remains stopped. No factory reset, data deletion or host driver changes were performed. Actual Docker build/runtime acceptance remains open.
+- Ubuntu WSL is available. Downloaded official Qdrant 1.19.1 Linux release and verified SHA-256 `eef986e769d4d3e806dd2d546e1b4ecdd416211e54d34b4ed764fac7c58e1085`. Ran an isolated localhost server with separate temporary storage and telemetry disabled.
+- Live external-Qdrant acceptance passed for both real encoders (SigLIP 2 768-d and CLIP 512-d): writes/ranking, album/favorite SQL filters, image-vector reuse, unchanged scan resume, reopened client state and missing-point cleanup. Added `verify_qdrant_server.py` with unique temporary collections and optional real-model inference; it does not write to personal image collections.
+- Restarted the actual Qdrant process and verified a persisted fixture vector/payload/ranking survived. Removed the isolated test collection, confirmed the server had no collections remaining, then stopped the test server. External CPU Qdrant server behavior is now verified locally; Docker-packaged Qdrant and GPU indexing remain separate unverified deployment modes.
+- NVIDIA GTX 1650/driver 591.86 are present. Project .venv still advertises Azure/CPU only. GPU dependency dry run is active (tool session 53469), downloading wheels into pip cache without installing them. Created an isolated verification environment under ignored data and added `verify_gpu_runtime.py` to install/test CUDA there without replacing the user's CPU environment. Actual GPU inference is not yet proven.
+- Requested the real pilot Drive folder, Cloudflare hostname and existing OAuth-client path while continuing independent work. Those live account/device gates remain open.
+
+Next actions: observe the existing GPU dependency resolution handle; install into the isolated environment only once resolution finishes, verify actual CUDA image/text sessions, then finish Docker startup/build verification if safely recoverable. Keep real Drive/phone prerequisites pending; synthetic/server fixture success does not prove personal-library search quality.
+
+### Additional acceptance evidence — 2026-10-02
+
+- Authentication race fixed: a 401 locks the current page, invalidates earlier API responses and clears visible private catalog/viewer/organization data. A later online event cannot hide the sign-in notice, and locked requests do not fetch until reload. Two tests execute the actual API/PWA code with an out-of-order response; both passed. Together with the service-worker privacy tests, five Node tests pass.
+- Executed the actual Compose healthcheck script against a real temporary HTTP server: 200/401 are healthy, while 404/500/503 fail. New packaging test passed. JavaScript syntax/verification-script compilation and whitespace checks passed.
+- Qdrant process restart durability is complete as recorded above. The verification server is stopped and had no remaining fixture collections. Docker Desktop startup still fails on its existing analytics socket, so an actual container build has not been claimed.
+- GPU dependency dry run (session 53469) remains a verified live process. CUDA/cuDNN, FFT, random-number and BLAS runtime wheels have downloaded; NVJitLink was downloading at the latest observation. No GPU packages have been installed into the project's .venv. Continue observing this same handle, then run the isolated GPU verifier once resolution completes.
+
+### CUDA verification completed — 2026-10-02
+
+- Dependency resolution finished successfully. Installed the GPU profile only into ignored `data/gpu-verification-env`; the application's CPU `.venv` remains intact. The isolated runtime passed `pip check`.
+- `verify_gpu_runtime.py --prepare` completed with exit code 0. Both SigLIP 2 (768 dimensions) and CLIP (512 dimensions) loaded actual CUDA sessions on the GTX 1650 with explicit CUDA enforcement. Each model ranked the matching red/blue/green fixture first and processed zero images on an unchanged second indexing pass.
+- ONNX Runtime emitted a CLIP graph memory-copy performance warning; ranking and resume checks passed. This fixture test does not establish throughput or quality on the personal library.
+- External Qdrant server persistence and CUDA inference now have actual local acceptance evidence. Docker Desktop still cannot report a running engine; container build/runtime acceptance remains open. No Docker reset or existing-data deletion was performed.
+- Final regression audit passed: 73 Python tests under default SigLIP 2 and 73 under CLIP, plus all five Node authentication/service-worker tests. `git diff --check` passed with only repository line-ending notices. No verification processes remain running.
+- Next: obtain the OAuth-client path/Drive pilot root and Cloudflare hostname, verify real incremental sync and library search quality, then complete phone/tunnel acceptance. Those prerequisites remain pending; stages 1–3 are not fully accepted.
+
+## Stage 4 — Optional local OCR — 2026-10-02
+
+User authorized the next phase and selected English first. Implementing the roadmap's optional text search; the Drive/Cloudflare/Docker acceptance gates remain independent and open. DINOv3 remains deferred until personal-library measurements justify another visual model.
+
+Plan:
+- [x] Verify runtime/model distribution, license and fixed model checksums. RapidOCR 1.4.4 ships PP-OCRv4 models; Apache-2.0 licenses from RapidOCR/PaddleOCR. The 14.9 MB wheel SHA-256 matches PyPI's published digest. Three bundled model hashes are verified on every worker invocation.
+- [x] Isolate OCR dependencies in `data/ocr-env`, preserving CPU/GPU embedding environments. Pin primary dependencies; add setup command and runtime availability status.
+- [x] Add opt-in single-worker automatic extraction, on-demand photo extraction, pause/retry/clear and startup resume. Input uses the existing 64 MB checksum/orientation-safe loader, then a 1600px in-memory PNG; 60-second subprocess limit, two CPU threads. Originals are never saved or edited.
+- [x] Persist revision/model-scoped text, errors and timings in SQLite; stale/missing/model-incompatible results do not appear in search or the viewer. Epoch guards discard in-flight results after pause/clear. Record jobs in shared job history.
+- [x] Add authenticated OCR API, combined names/tags/OCR literal search and OCR-only mode, filtered through existing folder/person/album/date/favorite options. Keep visual ranking unchanged.
+- [x] Add setup controls and selectable viewer text with mobile touch targets; clear visible OCR text on authentication failure. Update shell cache version.
+- [x] Finish failure/recovery/API regression checks, real English fixture cost measurement, and local mobile UI verification.
+- [x] Document installation, text privacy, backup/clear semantics and measured limitations.
+
+Early evidence: isolated runtime installation and pip check passed; model checksums verified. Real generated English invoice fixture extracted `INVOICE ACME2026 / Payment received`, found by catalog text search, in 2.11 seconds including process/model startup. Initial service tests found an incorrect test Basic-auth username (the app expects `frame`); corrected the fixture, pending rerun. No personal images were processed; automatic extraction remains disabled.
+
+Final verification: 80 Python tests passed under default SigLIP 2 and 80 under CLIP, including seven OCR tests for authenticated/filtered search, persistence, changed/missing content, clear during extraction, explicit retry, queued photo revision validation, and restart/job-count behavior. Five Node privacy/authentication tests passed. Main CPU environment `pip check`, JavaScript syntax, Python compilation and whitespace checks passed. Real extraction was rerun with assertions that all three actual ONNX sessions use CPU, passing in 2.61 seconds. A wrapper-attribute mismatch in the new provider assertion was corrected using the actual RapidOCR recognizer session structure before this successful check.
+
+Browser verification at 390×844: single-photo extraction produced `INVOICE ACME 2026`; extracted text displayed in the viewer, the extraction button measured 44px, and document width matched the viewport. OCR-only matching and empty searches, setup progress/job history, enable and pause controls were exercised against generated fixtures in ignored `data/ocr-ui-qa`, independent of the personal catalog. Screenshot: `data/mobile-ocr-qa.png`. Real phone/Cloudflare and personal-library OCR accuracy remain unverified. Automatic extraction is disabled in the personal catalog; installed runtime is ready to opt in through Setup after app restart.
+
+Handoff: 320px gallery verification also showed no horizontal overflow. The temporary browser tab was closed, viewport reset, and fixture server stopped. After refining job accounting to report discarded in-flight work as interrupted rather than failed, all seven OCR tests and five Node tests passed again. Assistant pointer files remain correct. Restart the dashboard to load the new routes/UI, then opt in to OCR through Setup or extract individual photos. No personal-library OCR pass was started. Stage-4 OCR implementation/local verification is delivered; earlier Drive/Docker/Cloudflare acceptance gates remain open.
+
+## Commit checkpoint — 2026-10-02
+
+User requested committing the current changes. Included reliability/runtime setup, incremental sync/private thumbnail cache, gallery discovery/PWA, backup/verification tooling and optional OCR with their tests and documentation. Runtime data, OAuth secrets, environments, model weights and QA artifacts remain ignored. Verification evidence and outstanding Drive/Docker/Cloudflare acceptance gates above remain unchanged. This is a local Git commit; no push or deployment is requested.

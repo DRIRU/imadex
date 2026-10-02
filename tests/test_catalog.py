@@ -72,6 +72,17 @@ class CatalogTests(unittest.TestCase):
             row = conn.execute('SELECT * FROM images').fetchone()
             self.assertEqual((row['name'],row['favorite'],row['tags'],row['missing']), ('renamed.jpg',1,'blue',0))
 
+    def test_capture_time_uses_original_exif_and_refreshes_legacy_metadata(self):
+        exif=Image.Exif();exif[306]='2026:10:02 00:00:00';exif[36867]='2024:02:29 12:00:00'
+        Image.new('RGB',(40,30),'red').save(self.root/'camera.jpg',exif=exif)
+        self.scan()
+        with app.db() as conn:
+            row=conn.execute('SELECT * FROM images').fetchone();self.assertEqual(row['taken'],'2024:02:29 12:00:00')
+            conn.execute("UPDATE images SET taken='2026:10:02',taken_source=''")
+        self.scan()
+        with app.db() as conn:
+            row=conn.execute('SELECT * FROM images').fetchone();self.assertEqual(row['taken'],'2024:02:29 12:00:00');self.assertEqual(row['taken_source'],'exif-original')
+
     def test_http_search_and_cross_origin_protection(self):
         Image.new('RGB', (10, 20), 'blue').save(self.root / 'blue.png')
         self.scan()

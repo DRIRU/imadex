@@ -1,4 +1,5 @@
 import sys
+import os
 import unittest
 from pathlib import Path
 
@@ -10,8 +11,8 @@ class ModelSelectionTests(unittest.TestCase):
     def test_siglip2_is_the_default(self):
         self.assertEqual(semantic.DEFAULT_MODEL, 'siglip2')
         self.assertEqual(semantic.MODELS['siglip2']['dimensions'], 768)
-        self.assertEqual(semantic.DIMENSIONS, 768)
-        self.assertEqual(semantic.COLLECTION, 'images_siglip2_base_v1')
+        self.assertEqual(semantic.select(None)['dimensions'], 768)
+        self.assertEqual(semantic.select(None)['collection'], 'images_siglip2_base_v1')
 
     def test_selection_returns_matching_configuration(self):
         clip = semantic.select('clip')
@@ -26,7 +27,7 @@ class ModelSelectionTests(unittest.TestCase):
             semantic.select('resnet')
 
     def test_active_constants_come_from_the_selection(self):
-        active = semantic.MODELS[semantic.DEFAULT_MODEL]
+        active = semantic.select(os.environ.get('IMAGE_INDEX_MODEL'))
         self.assertEqual(semantic.VISION_MODEL, active['vision'])
         self.assertEqual(semantic.TEXT_MODEL, active['text'])
         self.assertEqual(semantic.MODEL_VERSION, active['version'])

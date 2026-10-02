@@ -1,0 +1,14 @@
+.systemButton{min-height:44px;margin:0 0 16px;}
+#systemDialog{width:min(680px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;}
+#systemDialog section{border-top:1px solid var(--border,#ddd);margin-top:20px;padding-top:16px;}
+#setupSummary{display:grid;grid-template-columns:minmax(100px,1fr) 2fr;gap:12px;}
+#setupSummary dt{font-weight:600;}#setupSummary dd{margin:0;overflow-wrap:anywhere;}
+#systemDialog button{min-height:44px;margin:6px 4px 6px 0;}
+#systemDialog input[type=number]{max-width:180px;min-height:44px;}
+#systemDialog label{display:block;margin:12px 0;}
+#systemDialog label:has(input[type=checkbox]){display:flex;gap:10px;align-items:center;}
+#systemDialog input[type=checkbox]{width:22px;height:22px;}
+#jobHistory{padding-left:20px;}#jobHistory li{margin:12px 0;overflow-wrap:anywhere;}
+#syncFailures,#modelDownload{overflow-wrap:anywhere;}
+
+.ocrDetails button{min-height:44px}.ocrDetails pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font:inherit;user-select:text}#ocrStatus{overflow-wrap:anywhere}

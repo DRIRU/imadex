@@ -1,0 +1,13 @@
+#discoveryDialog,#bulkDialog{width:min(680px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;}
+.discoveryControls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+.discoveryControls button,.organizationRow button,#timelineMonths button,#discoveryDialog button,#bulkDialog button{min-height:44px;}
+#discoveryDialog section{border-top:1px solid var(--border,#ddd);padding:16px 0;}
+#discoveryDialog label,#bulkDialog label{display:block;margin:12px 0;}
+#discoveryDialog input,#discoveryDialog select,#bulkDialog input,#bulkDialog select{min-height:44px;max-width:100%;}
+.organizationRow{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;}
+.organizationRow button:first-child{flex:1;overflow-wrap:anywhere;text-align:left;}
+#timelineMonths{display:flex;flex-wrap:wrap;gap:8px;}
+#activeDiscovery{overflow-wrap:anywhere;}
+
+#duplicateDialog{width:min(800px,calc(100vw - 24px));max-height:calc(100dvh - 24px);overflow:auto;} .comparePreviews{display:grid;grid-template-columns:1fr 1fr;gap:12px}.comparePreviews figure{margin:0;min-width:0}.comparePreviews img{width:100%;max-height:260px;object-fit:contain}.comparePreviews figcaption{overflow-wrap:anywhere}.duplicatePair{border-top:1px solid var(--border,#ddd);padding:16px 0}.duplicatePair button{min-height:44px;margin:6px}
+@media(max-width:480px){.comparePreviews{grid-template-columns:1fr}}

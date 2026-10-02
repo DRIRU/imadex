@@ -90,6 +90,39 @@ class SemanticTests(unittest.TestCase):
         page2 = self.index.search('red', offset=1, limit=1)
         self.assertNotEqual(page1['items'][0]['id'], page2['items'][0]['id'])
 
+    def test_similar_reuses_vector_excludes_source_and_respects_filters(self):
+        self.index.index_pending()
+        with app.db() as conn:
+            source = conn.execute("SELECT id FROM images WHERE name='red.png'").fetchone()[0]
+            conn.execute("UPDATE images SET favorite=1 WHERE name='blue.png'")
+        with patch.object(self.index, 'encode_text', side_effect=AssertionError('No inference needed')):
+            result = self.index.similar(source)
+            self.assertEqual(result['total'], 2)
+            self.assertEqual(result['items'][0]['name'], 'red-copy.png')
+            self.assertNotIn(source, [r['id'] for r in result['items']])
+            filtered = self.index.similar(source, 'missing=0 AND favorite=1')
+            self.assertEqual(filtered['items'][0]['name'], 'blue.png')
+        Image.new('RGB', (40,30), 'green').save(self.photos / 'red.png')
+        self.scan()
+        with self.assertRaises(ValueError): self.index.similar(source)
+
+    def test_visual_duplicate_candidates_review_and_content_invalidation(self):
+        # Re-encoding a different file with the same visual vector suggests a pair;
+        # byte-identical copies belong to the existing exact-checksum view.
+        Image.new('RGB',(41,31),'red').save(self.photos/'red-copy.png')
+        self.scan();self.index.index_pending()
+        result=self.index.near_duplicates()
+        self.assertEqual(len(result['pairs']),1)
+        pair=result['pairs'][0]
+        import gallery
+        organization=gallery.Gallery(app.db)
+        organization.mutate({'action':'review_duplicate','decision':'different',
+            'photos':[{'id':p['id'],'revision':p['revision']} for p in (pair['left'],pair['right'])]})
+        self.assertEqual(self.index.near_duplicates()['pairs'],[])
+        Image.new('RGB',(42,32),'red').save(self.photos/'red-copy.png')
+        self.scan();self.index.index_pending()
+        self.assertEqual(len(self.index.near_duplicates()['pairs']),1)
+
     def test_failed_images_are_visible_and_retryable(self):
         with patch.object(self.index, 'load_image', side_effect=ValueError('Drive disconnected')):
             self.index.index_pending()
@@ -98,6 +131,17 @@ class SemanticTests(unittest.TestCase):
         self.index.queue(retry_failed=True)
         self.index.index_pending()
         self.assertEqual(self.index.status()['ready'], 3)
+
+    def test_embedding_job_history_counts_failures_and_omits_unchanged_checks(self):
+        with patch.object(self.index,'load_image',side_effect=ValueError('Unavailable')):self.index.index_pending()
+        with app.db() as conn:
+            job=conn.execute("SELECT * FROM job_history WHERE kind='embeddings' ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual((job['status'],job['processed'],job['failed_count']),('failed',3,3))
+            self.assertGreaterEqual(job['finished'],job['started'])
+        self.index.queue(retry_failed=True);self.index.index_pending();self.index.index_pending()
+        with app.db() as conn:
+            jobs=conn.execute("SELECT * FROM job_history WHERE kind='embeddings' ORDER BY id").fetchall()
+            self.assertEqual(len(jobs),2);self.assertEqual(jobs[-1]['status'],'complete')
         self.assertEqual(self.index.status()['failed'], 0)
 
     def test_recovers_vector_written_before_catalog_record(self):

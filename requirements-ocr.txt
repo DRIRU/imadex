@@ -1,0 +1,11 @@
+# Separate CPU environment; do not install into the embedding environment.
+rapidocr-onnxruntime==1.4.4
+onnxruntime==1.30.0
+opencv-python==4.11.0.86
+numpy==2.2.6
+Pillow==12.2.0
+PyYAML==6.0.3
+pyclipper==1.4.0
+Shapely==2.1.2
+six==1.17.0
+tqdm==4.70.1

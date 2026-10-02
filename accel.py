@@ -6,17 +6,32 @@ Controlled by the IMAGE_INDEX_PROVIDER environment variable:
 - ``cpu``: always CPU.
 - ``cuda`` / ``gpu``: require CUDA; raise if the CPU-only onnxruntime is installed.
 
-This only affects CLIP/ArcFace inference. Qdrant local mode and the pip OpenCV
+This affects image/text and ArcFace inference. Qdrant local mode and the pip OpenCV
 build remain CPU-only.
 """
 import os
+import threading
 
 CPU = 'CPUExecutionProvider'
 CUDA = 'CUDAExecutionProvider'
+_preload_lock = threading.Lock()
+_preloaded = False
+
+
+def preload_runtime(runtime):
+    """Load pip-provided CUDA/cuDNN libraries once, before creating GPU sessions."""
+    global _preloaded
+    with _preload_lock:
+        if not _preloaded and callable(getattr(runtime, 'preload_dlls', None)):
+            runtime.preload_dlls()
+            _preloaded = True
 
 
 def mode():
-    return (os.environ.get('IMAGE_INDEX_PROVIDER', 'auto').strip().lower() or 'auto')
+    value = os.environ.get('IMAGE_INDEX_PROVIDER', 'auto').strip().lower() or 'auto'
+    if value not in ('auto', 'cpu', 'none', 'cuda', 'gpu'):
+        raise ValueError('IMAGE_INDEX_PROVIDER must be auto, cpu, or cuda.')
+    return value
 
 
 def providers():
@@ -26,6 +41,7 @@ def providers():
     import onnxruntime
     available = onnxruntime.get_available_providers()
     if choice in ('auto', 'gpu', 'cuda') and CUDA in available:
+        preload_runtime(onnxruntime)
         return [CUDA, CPU]
     if choice in ('gpu', 'cuda'):
         raise ValueError('IMAGE_INDEX_PROVIDER=' + choice + ' was requested, but CUDAExecutionProvider is unavailable. '
@@ -42,3 +58,23 @@ def active():
 
 def label():
     return ','.join(active())
+
+
+def session_providers(model):
+    """Inspect a loaded ONNX session through FastEmbed's model wrappers."""
+    seen = set()
+    for _ in range(6):
+        if model is None or id(model) in seen:
+            return []
+        seen.add(id(model))
+        if callable(getattr(model, 'get_providers', None)):
+            return list(model.get_providers())
+        model = getattr(model, 'model', None)
+    return []
+
+
+def require_requested_provider(model):
+    actual = session_providers(model)
+    if mode() in ('cuda', 'gpu') and CUDA not in actual:
+        raise ValueError('CUDA was requested but the loaded session fell back to CPU. Check CUDA/cuDNN and restart, or select cpu.')
+    return actual

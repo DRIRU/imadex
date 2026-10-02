@@ -6,13 +6,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 \
+    && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN python -m pip install -r requirements.txt
+ARG RUNTIME=cpu
+COPY requirements*.txt ./
+RUN case "$RUNTIME" in cpu|gpu) ;; *) echo 'RUNTIME must be cpu or gpu' >&2; exit 1;; esac
+RUN if [ "$RUNTIME" = gpu ]; then python -m pip install -r requirements-gpu.txt; else python -m pip install -r requirements.txt; fi
 
 COPY . .
 

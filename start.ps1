@@ -2,11 +2,10 @@ $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $python = '.\.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $python)) {
-    python -m venv .venv
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create Python environment.' }
+    & (Join-Path $PSScriptRoot 'setup-runtime.ps1') -Runtime cpu
 }
-& $python -m pip install -r requirements.txt
-if ($LASTEXITCODE -ne 0) { throw 'Could not install dependencies.' }
+& $python -c "import fastembed, onnxruntime, qdrant_client, cv2, PIL"
+if ($LASTEXITCODE -ne 0) { throw 'Dependencies are missing. Run setup-runtime.ps1 -Runtime cpu (or gpu), then start again.' }
 $model = Join-Path $PSScriptRoot 'data\models\w600k_r50.onnx'
 if (-not (Test-Path -LiteralPath $model)) {
     Write-Host 'Face recognition uses the ArcFace model (~275 MB, licensed for non-commercial research use only).'
@@ -18,4 +17,6 @@ if (-not (Test-Path -LiteralPath $model)) {
         Write-Host 'Skipping face recognition. Run .\download_arcface.py later to enable it.'
     }
 }
-& $python app.py @args
+# FastEmbed's tokenizer JSON loader uses the process default encoding.
+# SigLIP 2 includes Unicode tokens, so Windows must run Python in UTF-8 mode.
+& $python -X utf8 app.py @args

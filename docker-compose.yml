@@ -1,6 +1,9 @@
 services:
   imadex:
-    build: .
+    build:
+      context: .
+      args:
+        RUNTIME: "${IMAGE_INDEX_RUNTIME:-cpu}"
     image: imadex:local
     restart: unless-stopped
     # The container binds 0.0.0.0; the host binding below keeps it loopback-only.
@@ -19,6 +22,8 @@ services:
       QDRANT_COLLECTION: "${QDRANT_COLLECTION:-}"
       # Image/text encoder: siglip2 (default) or clip.
       IMAGE_INDEX_MODEL: "${IMAGE_INDEX_MODEL:-}"
+      IMAGE_INDEX_PROVIDER: "${IMAGE_INDEX_PROVIDER:-auto}"
+      QDRANT_TIMEOUT: "${QDRANT_TIMEOUT:-60}"
     healthcheck:
       test:
         - CMD
@@ -28,8 +33,9 @@ services:
           import urllib.error, urllib.request
           try:
               urllib.request.urlopen("http://127.0.0.1:8765/api/status", timeout=5)
-          except urllib.error.HTTPError:
-              pass
+          except urllib.error.HTTPError as error:
+              if error.code != 401:
+                  raise
       interval: 30s
       timeout: 5s
       retries: 3
